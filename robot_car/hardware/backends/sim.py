@@ -3,7 +3,7 @@
 Always resolves the current world via ``simulator.get_world()`` so tests which swap
 the world with ``reset_world()`` are always reflected.
 
-The camera is the world's synthetic feed, which pans/rotates with the true pose so
+The camera is the world's raycast first-person feed, rendered from the true pose so
 visual odometry recovers real motion. A physical webcam must never be used here: its
 view is uncorrelated with the simulated robot, so VO would contradict the encoders
 and corrupt the localization fusion (false slip detection, random pose deltas).

@@ -85,3 +85,28 @@ def test_explore_builds_and_saves_map_in_sim(tmp_path):
         assert occupied > 50            # walls were mapped
         assert free > 200               # open space was mapped
         assert os.path.exists(os.path.join(str(tmp_path), "unit_room.map"))
+
+
+def test_explore_generated_world_with_live_camera(tmp_path):
+    # Explore a BSP-generated multi-room floor plan with the camera thread running
+    # against the raycast first-person feed -- VO and the appearance advisory are in
+    # the loop exactly as on the Pi, and exploration must still map the world.
+    from robot_car.hardware.camera import start_camera
+
+    config.MAPS_DIR = str(tmp_path)
+    with Stack(world="bsp", start=(0.0, 0.0, 0.0)) as s:
+        start_camera()                  # daemon; exits via state.stop_event
+        explorer = Explorer(s.ctx, save_name="unit_bsp")
+        stop = threading.Event()
+        t = threading.Thread(target=lambda: explorer.run(stop))
+        t.start()
+        time.sleep(12)
+        stop.set()
+        t.join(timeout=5)
+
+        grid = state.get_grid()
+        occupied = int((grid > config.INFLATION_OCCUPIED_THRESHOLD).sum())
+        free = int((grid < config.FRONTIER_FREE_THRESHOLD).sum())
+        assert occupied > 50            # generated walls were mapped
+        assert free > 200               # open space was mapped
+        assert os.path.exists(os.path.join(str(tmp_path), "unit_bsp.map"))

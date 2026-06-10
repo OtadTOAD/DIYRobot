@@ -43,12 +43,16 @@ def detect_features(gray: np.ndarray) -> np.ndarray | None:
 
 
 def estimate_motion(prev_gray, curr_gray, prev_features):
-    """Estimate the world-frame motion delta (dx, dy, dtheta) between two frames.
+    """Estimate the robot-frame motion delta (forward, lateral, dtheta) between frames.
 
-    Tracks features with Lucas-Kanade, fits a partial-affine (rotation + translation)
-    transform mapping the previous points to the current ones, then converts the
-    image motion of the frame centre into a world-frame robot displacement using the
-    camera scale. Returns ``(estimate, confidence, good_prev, good_next)``.
+    Tracks features with Lucas-Kanade and fits a partial-affine transform mapping the
+    previous points to the current ones, then reads it with a forward-camera model:
+    yaw shifts the whole image horizontally (``CAMERA_FOV`` radians per frame width),
+    and forward travel scales it about the centre (converted to metres against the
+    ``VO_ASSUMED_DEPTH_M`` scene-depth prior -- monocular VO has no absolute scale).
+    Lateral motion is unobservable separately from yaw and reported as 0; a
+    differential drive cannot strafe. Returns ``(estimate, confidence, good_prev,
+    good_next)``.
     """
     zero = ((0.0, 0.0, 0.0), 0.0, None, None)
     if prev_features is None or len(prev_features) == 0:
@@ -74,21 +78,20 @@ def estimate_motion(prev_gray, curr_gray, prev_features):
     if matrix is None:
         return (0.0, 0.0, 0.0), 0.0, good_prev, good_next
 
-    # Image rotation between frames maps directly to robot yaw under our render
-    # convention (and the forward camera after calibration on the real Pi).
-    dtheta = math.atan2(matrix[1, 0], matrix[0, 0])
-
-    # Displacement of the frame centre under the affine transform -> world motion.
+    # Horizontal displacement of the frame centre -> yaw. Turning left (+theta)
+    # pans the camera left, so the scene shifts right in the image (+disp_x).
     h, w = prev_gray.shape[:2]
     centre = np.array([w / 2.0, h / 2.0, 1.0])
     disp_x = float(matrix[0] @ centre) - w / 2.0
-    disp_y = float(matrix[1] @ centre) - h / 2.0
-    scale = config.VO_PIXELS_PER_METRE
-    dx = -disp_x / scale
-    dy = disp_y / scale
+    dtheta = disp_x * config.CAMERA_FOV / w
+
+    # Uniform scale of the affine fit -> forward travel: approaching a surface at
+    # depth D scales its image by D / (D - d), so d = D * (1 - 1/s).
+    s = math.hypot(matrix[0, 0], matrix[1, 0])
+    forward = config.VO_ASSUMED_DEPTH_M * (1.0 - 1.0 / s) if s > 1e-6 else 0.0
 
     conf = motion_confidence(len(good_prev), inliers)
-    return (dx, dy, dtheta), conf, good_prev, good_next
+    return (forward, 0.0, dtheta), conf, good_prev, good_next
 
 
 def motion_confidence(n_tracked: int, inliers) -> float:

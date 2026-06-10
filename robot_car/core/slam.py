@@ -150,10 +150,13 @@ class SlamSystem(threading.Thread):
 
         # The VO delta covers the same interval as the encoder update, so it is
         # applied to the pose from *before* that update -- applying it on top of
-        # enc_pose would count the cycle's motion twice.
+        # enc_pose would count the cycle's motion twice. The delta is robot-frame
+        # (forward, lateral, dtheta) from the forward camera; rotate it into the
+        # world frame at the pre-update heading.
         vo_delta, vo_conf = state.consume_vo()
-        vo_pose = (base_pose[0] + vo_delta[0],
-                   base_pose[1] + vo_delta[1],
+        cos_h, sin_h = math.cos(base_pose[2]), math.sin(base_pose[2])
+        vo_pose = (base_pose[0] + vo_delta[0] * cos_h - vo_delta[1] * sin_h,
+                   base_pose[1] + vo_delta[0] * sin_h + vo_delta[1] * cos_h,
                    base_pose[2] + vo_delta[2])
         slip = localization.detect_slip(self.odometry.last_distance, vo_delta, vo_conf)
 

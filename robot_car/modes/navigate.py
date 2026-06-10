@@ -26,15 +26,25 @@ class Navigator:
     def __init__(self, context):
         self.ctx = context
         self.path = []                  # current planned path, (col, row) cells
+        self.plan_grid = None           # planning grid the current path was built on
         self.path_listener = None       # callback(list_of_(col,row)) for the UI
 
     # -- planning ------------------------------------------------------------
     def plan(self, goal_cell):
         grid = self.ctx.planning_grid()
         start = self.ctx.current_cell()
+        if not pp.is_walkable(grid, self.ctx.forbidden.mask, *start):
+            # Pose is inside an inflated obstacle / forbidden zone (drift, safety
+            # recovery, pose correction). Plan from the nearest free cell and let
+            # route execution drive out through it, rather than failing outright.
+            start = pp.nearest_walkable(grid, start, self.ctx.forbidden.mask)
+            if start is None:
+                return None
+            state.set_log("warn", "Start pose blocked -- escaping via nearest free cell")
         path = pp.plan_path(grid, start, goal_cell, self.ctx.forbidden.mask)
         if path:
             self.path = path
+            self.plan_grid = grid
             self._emit_path(path)
         return path
 
@@ -54,8 +64,11 @@ class Navigator:
 
         gx, gy = self.ctx.grid_to_world(*goal_cell)
         period = 1.0 / config.CONTROL_HZ
-        idx = 1
+        # Start at the path head: it is the current cell in the normal case (reached
+        # instantly, advancing to 1) but the escape cell when the start was blocked.
+        idx = 0
         retry = 0
+        last_replan = time.monotonic()
         # Stall watchdog: remember the closest we have ever been to the goal and
         # when we last made measurable progress. A goal the robot can never reach
         # (or pose jitter orbiting it) would otherwise loop here forever.
@@ -80,18 +93,40 @@ class Navigator:
                 return NO_PATH
 
             if state.is_blocked():
-                motors.stop()
+                # Do NOT touch the motors here: while blocked, the safety monitor
+                # owns them and is running its reverse/pivot recovery -- a stop()
+                # from this loop would truncate the maneuver mid-way and leave the
+                # robot askew right next to the obstacle.
                 retry += 1
                 if retry >= config.REPLAN_RETRY_LIMIT:
                     state.set_log("warn", "Obstacle persists -- replanning")
                     if self.plan(goal_cell) is None:
                         return NO_PATH
-                    idx, retry = 1, 0
+                    idx, retry = 0, 0
                 stop_event.wait(config.REPLAN_WAIT_S)
                 continue
             retry = 0
 
             idx = min(idx, len(self.path) - 1)
+
+            # Deviation check: the path is string-pulled, so clearance is only
+            # guaranteed along the planned segments. If a safety recovery or a pose
+            # correction displaced us and the straight line to the waypoint now cuts
+            # an obstacle, replan instead of driving through it. Skipped while the
+            # current cell itself is blocked (escaping) -- LOS can never pass there.
+            cur = self.ctx.current_cell()
+            forbidden = self.ctx.forbidden.mask
+            if (pp.is_walkable(self.plan_grid, forbidden, *cur)
+                    and not pp.line_of_sight(self.plan_grid, cur, self.path[idx], forbidden)
+                    and now - last_replan >= config.NAV_REPLAN_MIN_INTERVAL_S):
+                motors.stop()
+                state.set_log("warn", "Off planned path -- replanning")
+                last_replan = now
+                if self.plan(goal_cell) is None:
+                    return NO_PATH
+                idx = 0
+                continue
+
             if self._step_toward(self.path[idx]) == REACHED:
                 idx += 1
             stop_event.wait(period)

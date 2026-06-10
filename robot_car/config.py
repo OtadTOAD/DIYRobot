@@ -136,6 +136,15 @@ STEER_GAIN = 0.6                # proportional heading correction while driving
 # the target). Prevents the navigator looping forever "stuck on nothing".
 NAV_PROGRESS_TIMEOUT_S = 8.0
 NAV_PROGRESS_EPSILON = 0.05     # m of goal-distance reduction that counts as progress
+# Off-path recovery. The executed path is string-pulled into long straight segments,
+# so after a safety recovery maneuver or a SLAM pose correction the straight line from
+# the *current* pose to the next waypoint may cut through a wall. When line of sight
+# to the waypoint is lost, replan instead of driving blind.
+NAV_REPLAN_MIN_INTERVAL_S = 1.0   # throttle for deviation-triggered replans
+# If the fused pose lands inside an inflated obstacle or a forbidden zone, A* would
+# refuse to plan (start unwalkable). Instead, plan from the nearest walkable cell
+# within this radius and drive out through it.
+NAV_ESCAPE_RADIUS_CELLS = 12      # 12 * 0.05 = 0.6 m search radius
 
 # ---------------------------------------------------------------------------
 # SLAM / scan matching
@@ -176,6 +185,9 @@ CAMERA_WIDTH = 320
 CAMERA_HEIGHT = 240
 CAMERA_FPS = 15
 CAMERA_HZ = 10.0                # processing loop target
+# Horizontal field of view of the forward-facing camera. Used by the simulator's
+# first-person renderer and by VO to convert horizontal image flow into yaw.
+CAMERA_FOV = math.radians(60)
 
 # Visual odometry (Shi-Tomasi + Lucas-Kanade)
 VO_MAX_CORNERS = 150
@@ -186,10 +198,11 @@ VO_LK_WIN = (21, 21)
 VO_LK_MAX_LEVEL = 3
 VO_REDETECT_THRESHOLD = 30      # re-detect features when good count drops below
 VO_MIN_TRACKED = 10             # below this, confidence is 0
-# Pixels -> metres scale for translational flow. In the simulator this matches the
-# synthetic top-down camera's render scale so VO recovers true motion; on real
-# hardware it is a calibration constant for the forward-facing USB camera.
-VO_PIXELS_PER_METRE = 300.0
+# Monocular forward VO has no depth, so the affine scale factor between frames is
+# converted to metres of forward travel against this assumed scene depth (distance
+# to the dominant tracked surface). A calibration constant on real hardware; in the
+# simulator it matches the front-wall distance of the test worlds.
+VO_ASSUMED_DEPTH_M = 2.0
 
 # Appearance-based obstacle detection
 APPEARANCE_ROI_TOP = 0.55       # analyse from 55% down to the bottom of frame
@@ -218,8 +231,23 @@ ZONES_EXTENSION = ".zones"
 # ---------------------------------------------------------------------------
 # Simulator parameters (used only when the sim backend is active)
 # ---------------------------------------------------------------------------
-SIM_WORLD = os.environ.get("ROBOT_SIM_WORLD", "room")  # built-in world name
+SIM_WORLD = os.environ.get("ROBOT_SIM_WORLD", "room")  # built-in world name or 'bsp'
 SIM_TICK_HZ = 100.0             # physics integration rate
 SIM_SENSOR_NOISE_CM = 0.8       # Gaussian noise stddev on ultrasonic readings
 SIM_ENCODER_SLIP = 0.02         # fractional random wheel slip
 SIM_START_POSE = (0.0, 0.0, 0.0)   # (x, y, theta)
+
+# Generated 'bsp' world: recursive division of a square into rooms, one door per
+# dividing wall. Positions snap to a lattice of one door width, with the world
+# shifted half a cell so no wall line passes through the start pose at the origin.
+SIM_BSP_SEED = int(os.environ.get("ROBOT_SIM_SEED", "42"))
+SIM_BSP_SIZE = 7.0              # m, side of the square floor plan (map is 10 m)
+SIM_BSP_DOOR = 0.7              # m, door width == lattice pitch
+SIM_BSP_MIN_ROOM = 1.4          # m, chambers narrower than this are not split
+
+# First-person camera renderer (raycaster over the world's wall segments).
+SIM_WALL_HALF_HEIGHT = 0.25     # m, wall half-height above/below the camera axis
+SIM_SHADE_FALLOFF = 0.35        # brightness = 1 / (1 + distance * falloff)
+SIM_WALL_TEX_PPM = 200.0        # texture pixels per metre along a wall
+SIM_FLOOR_GRAY = 130            # untextured floor/ceiling base brightness
+SIM_CEIL_GRAY = 105

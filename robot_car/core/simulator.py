@@ -8,8 +8,10 @@ real GPIO. The world holds:
 * the ground-truth robot pose, integrated from commanded wheel speeds,
 * synthetic ultrasonic readings (ray vs. segment intersection + noise),
 * synthetic encoder pulse counts (wheel travel + slip),
-* a synthetic camera frame that translates/rotates with motion so the real
-  Shi-Tomasi + Lucas-Kanade visual-odometry pipeline recovers the motion.
+* a first-person camera frame raycast from the wall segments (Wolfenstein-style:
+  one ray per column, wall height ~ 1/distance, textured walls, shaded floor and
+  ceiling), so the real Shi-Tomasi + Lucas-Kanade visual-odometry and appearance
+  pipelines see what a forward-facing camera in this world would actually see.
 
 The same SLAM / A* / explore / navigate / web code therefore runs end-to-end on a
 laptop. A background physics thread advances the world in real time; tests can also
@@ -41,7 +43,62 @@ def _rect_walls(x0, y0, x1, y1):
     ]
 
 
-def _build_world(name: str):
+def generate_bsp_world(seed: int | None = None):
+    """Recursive-division floor plan: cut a square in two, leave a door, recurse.
+
+    All coordinates snap to a lattice whose pitch is one door width, and every
+    dividing wall gets exactly one one-cell door, so the resulting rooms are always
+    fully connected (a wall is zero-width and can at most touch a door's edge).
+    The lattice is offset half a cell from the world origin so no wall line can
+    pass through the default start pose at (0, 0).
+    """
+    rng = np.random.default_rng(config.SIM_BSP_SEED if seed is None else seed)
+    pitch = config.SIM_BSP_DOOR
+    n = int(round(config.SIM_BSP_SIZE / pitch))
+    min_cells = max(2, int(math.ceil(config.SIM_BSP_MIN_ROOM / pitch)))
+
+    def to_world(c, r):
+        return ((c - n / 2) * pitch + pitch / 2, (r - n / 2) * pitch + pitch / 2)
+
+    segs = []   # ((c0, r0), (c1, r1)) in lattice coordinates
+
+    def split(c0, r0, c1, r1):
+        w, h = c1 - c0, r1 - r0
+        can_v, can_h = w >= 2 * min_cells, h >= 2 * min_cells
+        if not can_v and not can_h:
+            return
+        vertical = can_v and (not can_h or w > h or (w == h and rng.random() < 0.5))
+        if vertical:
+            c = int(rng.integers(c0 + min_cells, c1 - min_cells + 1))
+            door = int(rng.integers(r0, r1))
+            if door > r0:
+                segs.append(((c, r0), (c, door)))
+            if door + 1 < r1:
+                segs.append(((c, door + 1), (c, r1)))
+            split(c0, r0, c, r1)
+            split(c, r0, c1, r1)
+        else:
+            r = int(rng.integers(r0 + min_cells, r1 - min_cells + 1))
+            door = int(rng.integers(c0, c1))
+            if door > c0:
+                segs.append(((c0, r), (door, r)))
+            if door + 1 < c1:
+                segs.append(((door + 1, r), (c1, r)))
+            split(c0, r0, c1, r)
+            split(c0, r, c1, r1)
+
+    split(0, 0, n, n)
+    x0, y0 = to_world(0, 0)
+    x1, y1 = to_world(n, n)
+    walls = _rect_walls(x0, y0, x1, y1)
+    walls += [(to_world(*a), to_world(*b)) for a, b in segs]
+    return walls, []
+
+
+def _build_world(name: str, seed: int | None = None):
+    if name == "bsp":
+        return generate_bsp_world(seed)
+
     if name == "empty":
         return _rect_walls(-2.0, -2.0, 2.0, 2.0), []
 
@@ -97,8 +154,8 @@ def _point_segment_distance(px, py, ax, ay, bx, by):
 class World:
     """Ground-truth simulated environment and robot state."""
 
-    def __init__(self, world_name: str | None = None, start_pose=None):
-        self.walls, self.cliffs = _build_world(world_name or config.SIM_WORLD)
+    def __init__(self, world_name: str | None = None, start_pose=None, seed=None):
+        self.walls, self.cliffs = _build_world(world_name or config.SIM_WORLD, seed)
         sp = start_pose if start_pose is not None else config.SIM_START_POSE
         self.x, self.y, self.theta = float(sp[0]), float(sp[1]), float(sp[2])
 
@@ -117,8 +174,10 @@ class World:
         self._running = False
         self._last_time = None
 
-        # Synthetic camera texture (static feature-rich scene we pan/rotate over).
+        # Wall texture for the first-person renderer + per-segment raycast arrays.
         self._texture = self._make_texture()
+        self._wall_a, self._wall_b, self._wall_len, self._wall_uoff = (
+            self._precompute_walls())
         # An obstacle blob that can be injected into the camera's lower ROI.
         self.camera_obstacle = False
 
@@ -214,35 +273,84 @@ class World:
         import cv2
         rng = np.random.default_rng(7)
         # Low-resolution noise upscaled to large smooth blobs -> trackable gradients
-        # and stable Shi-Tomasi corners (high-frequency per-pixel noise defeats LK).
-        low = rng.integers(0, 255, size=(80, 80), dtype=np.uint8)
-        tex = cv2.resize(low, (1600, 1600), interpolation=cv2.INTER_CUBIC)
-        # Smooth gradients give Shi-Tomasi/LK plenty to track without the strong
-        # Canny edges that sharp marks would create (which would trip the appearance
-        # detector on every frame). The blobs alone are enough for the VO pipeline.
-        return tex
+        # and stable Shi-Tomasi corners (high-frequency per-pixel noise defeats LK),
+        # without the strong Canny edges that sharp marks would create (which would
+        # trip the appearance detector on every frame). Columns wrap horizontally
+        # along the walls; rows span the wall's vertical extent.
+        low = rng.integers(60, 200, size=(16, 256)).astype(np.uint8)
+        return cv2.resize(low, (4096, 256), interpolation=cv2.INTER_CUBIC)
+
+    def _precompute_walls(self):
+        a = np.array([seg[0] for seg in self.walls], dtype=np.float64)
+        b = np.array([seg[1] for seg in self.walls], dtype=np.float64)
+        length = np.hypot(b[:, 0] - a[:, 0], b[:, 1] - a[:, 1])
+        # Cumulative offset gives each wall a distinct, world-anchored texture span.
+        u_offset = np.concatenate([[0.0], np.cumsum(length)[:-1]])
+        return a, b, length, u_offset
 
     def render_camera(self) -> np.ndarray:
-        """Render a synthetic top-down BGR frame that pans/rotates with the pose.
+        """Raycast a first-person BGR frame of the wall segments (Wolfenstein-style).
 
-        World (x, y) maps to texture pixels at ``VO_PIXELS_PER_METRE`` so the visual
-        odometry pipeline recovers true motion; the frame is rotated by ``-theta``.
+        One ray per image column; wall band height is proportional to 1/distance,
+        walls sample a world-anchored smooth texture, and floor/ceiling are shaded
+        by the distance each row sees, so brightness stays continuous across the
+        wall base (no fake Canny edges) while motion produces geometrically correct
+        optical flow for the forward-camera VO model.
         """
         with self._lock:
             x, y, theta, obstacle = self.x, self.y, self.theta, self.camera_obstacle
         h, w = config.CAMERA_HEIGHT, config.CAMERA_WIDTH
-        cx, cy = self._texture.shape[1] / 2, self._texture.shape[0] / 2
-        scale = config.VO_PIXELS_PER_METRE
-        px = cx + x * scale
-        py = cy - y * scale
-        cos_t, sin_t = math.cos(-theta), math.sin(-theta)
+        fov = config.CAMERA_FOV
+        half_wall = config.SIM_WALL_HALF_HEIGHT
+        falloff = config.SIM_SHADE_FALLOFF
+        a, b, length, u_off = self._wall_a, self._wall_b, self._wall_len, self._wall_uoff
 
-        ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
-        xs -= w / 2.0
-        ys -= h / 2.0
-        sample_x = (px + xs * cos_t - ys * sin_t).astype(np.int32) % self._texture.shape[1]
-        sample_y = (py + xs * sin_t + ys * cos_t).astype(np.int32) % self._texture.shape[0]
-        gray = self._texture[sample_y, sample_x]
+        # One ray per column at equal angular steps; column 0 is leftmost in view.
+        rel = fov / 2 - (np.arange(w) + 0.5) * fov / w            # (W,)
+        ang = theta + rel
+        dx, dy = np.cos(ang), np.sin(ang)
+        ex, ey = b[:, 0] - a[:, 0], b[:, 1] - a[:, 1]             # (N,)
+        ax0, ay0 = a[:, 0] - x, a[:, 1] - y
+        denom = dx[:, None] * ey - dy[:, None] * ex               # (W, N)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (ax0 * ey - ay0 * ex) / denom
+            s = (ax0 * dy[:, None] - ay0 * dx[:, None]) / denom
+        valid = (np.abs(denom) > 1e-12) & (t > 1e-9) & (s >= 0.0) & (s <= 1.0)
+        t = np.where(valid, t, np.inf)
+        idx = np.argmin(t, axis=1)                                # nearest wall per column
+        cols = np.arange(w)
+        tmin = t[cols, idx]
+        hit = np.isfinite(tmin)
+        s_hit = np.clip(np.where(hit, s[cols, idx], 0.0), 0.0, 1.0)
+        d_perp = np.where(hit, tmin, 1e6) * np.cos(rel)           # fisheye correction
+
+        f_px = (w / 2) / math.tan(fov / 2)                        # focal length, px
+        half_px = f_px * half_wall / np.maximum(d_perp, 1e-3)     # (W,)
+        horizon = h / 2.0
+        top, bot = horizon - half_px, horizon + half_px
+
+        # Floor/ceiling: each row below/above the horizon sees the ground/ceiling
+        # plane at this distance; shading by it matches the wall shade at the wall
+        # base exactly, so the wall-floor boundary is smooth.
+        ys = np.arange(h, dtype=np.float64)[:, None]              # (H, 1)
+        d_fc = f_px * half_wall / np.maximum(np.abs(ys - horizon), 0.5)
+        base_gray = np.where(ys > horizon, config.SIM_FLOOR_GRAY, config.SIM_CEIL_GRAY)
+        img = np.repeat(base_gray / (1.0 + d_fc * falloff), w, axis=1)
+
+        # Wall band: texture by (distance along wall, height in band), faded into
+        # the floor/ceiling gray near the band edges (again: no hard horizontal edge).
+        wall_mask = (ys >= top) & (ys < bot)
+        v = (ys - top) / np.maximum(2.0 * half_px, 1e-6)          # (H, W) 0..1 in band
+        tex_h, tex_w = self._texture.shape
+        u_px = ((u_off[idx] + s_hit * length[idx]) * config.SIM_WALL_TEX_PPM)
+        u_px = u_px.astype(np.int64) % tex_w
+        v_px = np.clip((v * tex_h).astype(np.int64), 0, tex_h - 1)
+        tex = self._texture[v_px, np.broadcast_to(u_px, (h, w))]
+        window = np.clip((0.5 - np.abs(v - 0.5)) * 6.0, 0.0, 1.0)
+        wall_val = (tex * window + base_gray * (1.0 - window)) / (1.0 + d_perp * falloff)
+        img = np.where(wall_mask & hit, wall_val, img)
+
+        gray = np.clip(img, 0, 255).astype(np.uint8)
         frame = np.dstack([gray, gray, gray])
 
         if obstacle:
@@ -303,11 +411,11 @@ def get_world() -> World:
         return _world
 
 
-def reset_world(world_name: str | None = None, start_pose=None) -> World:
+def reset_world(world_name: str | None = None, start_pose=None, seed=None) -> World:
     """Replace the singleton (used by tests and at startup)."""
     global _world
     with _world_lock:
         if _world is not None:
             _world.stop()
-        _world = World(world_name=world_name, start_pose=start_pose)
+        _world = World(world_name=world_name, start_pose=start_pose, seed=seed)
         return _world

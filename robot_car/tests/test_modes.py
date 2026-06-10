@@ -67,6 +67,20 @@ def test_scan_motion_guard_skips_fast_rotation():
     assert ok((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)) is False              # big jump -> skip
 
 
+def test_plan_escapes_blocked_start(ctx):
+    # Robot pose inside a forbidden zone: A* would reject the start cell, but the
+    # navigator must escape via the nearest free cell instead of failing outright.
+    state.set_pose((0.0, 0.0, 0.0))
+    start = ctx.current_cell()
+    ctx.forbidden.add_zone(start[0] - 2, start[1] - 2, start[0] + 2, start[1] + 2)
+    nav = Navigator(ctx)
+    goal = ctx.slam.grid.world_to_grid(1.0, 0.0)
+    path = nav.plan(goal)
+    assert path is not None
+    assert not ctx.forbidden.mask[path[0][1], path[0][0]]   # path starts outside zone
+    assert path[-1] == goal
+
+
 def test_navigate_stall_watchdog_gives_up(ctx, monkeypatch):
     # Pose never changes (no sim physics / SLAM running), so the robot can make no
     # progress toward a reachable goal -- the watchdog must abandon it, not loop.

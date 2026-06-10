@@ -50,6 +50,32 @@ def is_walkable(grid: np.ndarray, forbidden, col: int, row: int) -> bool:
     return True
 
 
+def nearest_walkable(grid: np.ndarray, cell, forbidden=None,
+                     max_radius: int = config.NAV_ESCAPE_RADIUS_CELLS):
+    """Closest walkable cell to ``cell`` within ``max_radius`` cells, or None.
+
+    Scans concentric square rings outward and returns the Euclidean-nearest hit in
+    the first ring that contains one, so a pose stuck inside an inflated obstacle
+    or forbidden zone gets the shortest escape.
+    """
+    if is_walkable(grid, forbidden, *cell):
+        return cell
+    c0, r0 = cell
+    for radius in range(1, max_radius + 1):
+        best, best_d = None, math.inf
+        for dc in range(-radius, radius + 1):
+            for dr in range(-radius, radius + 1):
+                if max(abs(dc), abs(dr)) != radius:
+                    continue
+                if is_walkable(grid, forbidden, c0 + dc, r0 + dr):
+                    d = dc * dc + dr * dr
+                    if d < best_d:
+                        best, best_d = (c0 + dc, r0 + dr), d
+        if best is not None:
+            return best
+    return None
+
+
 def astar(grid: np.ndarray, start, goal, forbidden=None):
     """Return a list of (col, row) cells from start to goal, or None if no path."""
     if not is_walkable(grid, forbidden, *goal) or not is_walkable(grid, forbidden, *start):

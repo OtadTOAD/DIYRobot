@@ -94,10 +94,19 @@ Shared state and locks live only in `state.py`; use its accessor helpers.
 - **Inflation is applied at plan time** (`OccupancyGrid.planning_grid`) so scan matching
   still runs against true (un-inflated) walls; the saved `.map` holds the base grid.
 - **Forbidden zones** are a separate boolean layer saved as `.zones` beside the `.map`.
-- **VO** outputs a world-frame motion delta recovered via a partial-affine fit of the
-  optical flow; confidence is the RANSAC inlier ratio. Weight 0.15, used mainly for
-  slip detection. (On the real forward-facing camera this needs calibrating —
-  `VO_PIXELS_PER_METRE`.)
+- **VO** outputs a robot-frame `(forward, 0, dtheta)` delta from a partial-affine fit
+  of the optical flow, read with a forward-camera model: yaw from the horizontal image
+  shift (`CAMERA_FOV`), forward travel from the affine scale against the
+  `VO_ASSUMED_DEPTH_M` depth prior (monocular VO has no absolute scale); the SLAM loop
+  rotates it into the world frame. Confidence is the RANSAC inlier ratio. Weight 0.15,
+  used mainly for slip detection.
+- **The sim camera is a first-person raycaster** (Wolfenstein-style) over the world's
+  wall segments — textured walls, distance-shaded floor/ceiling — so both camera
+  pipelines run against geometrically correct imagery, not noise.
+  `ROBOT_SIM_WORLD=bsp` (plus `ROBOT_SIM_SEED=n`) generates a multi-room floor plan by
+  recursive division: cut a box in half, leave a one-door gap in every dividing wall
+  (connectivity guaranteed), recurse; everything snaps to a door-width lattice offset
+  half a cell so the (0,0) start pose stays clear.
 
 ## Build plan (followed; all phases complete)
 

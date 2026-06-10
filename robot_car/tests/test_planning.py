@@ -50,6 +50,28 @@ def test_walkable_threshold_boundary():
     assert pp.is_walkable(grid, None, 9, 9) is False
 
 
+def test_nearest_walkable_already_free():
+    grid = _free_grid()
+    assert pp.nearest_walkable(grid, (5, 5)) == (5, 5)
+
+
+def test_nearest_walkable_escapes_obstacle_blob():
+    grid = _free_grid()
+    grid[3:10, 3:10] = config.GRID_OCCUPIED   # blob; (5, 5) is inside it
+    cell = pp.nearest_walkable(grid, (5, 5))
+    assert cell is not None
+    col, row = cell
+    assert pp.is_walkable(grid, None, col, row)
+    # Nearest free cell from (5,5) is just outside the blob edge.
+    assert max(abs(col - 5), abs(row - 5)) <= 3
+
+
+def test_nearest_walkable_respects_forbidden_and_radius():
+    grid = _free_grid(20)
+    forbidden = np.ones((20, 20), dtype=bool)  # everything forbidden
+    assert pp.nearest_walkable(grid, (10, 10), forbidden, max_radius=5) is None
+
+
 def test_line_of_sight():
     grid = _free_grid()
     assert pp.line_of_sight(grid, (0, 0), (20, 0)) is True
