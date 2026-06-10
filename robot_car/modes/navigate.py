@@ -9,6 +9,7 @@ and retry; after ``REPLAN_RETRY_LIMIT`` retries, run a full A* from the current 
 from __future__ import annotations
 
 import math
+import time
 
 from robot_car import config, state
 from robot_car.core import path_planner as pp
@@ -58,13 +59,28 @@ class Navigator:
         period = 1.0 / config.CONTROL_HZ
         idx = 1
         retry = 0
+        # Stall watchdog: remember the closest we have ever been to the goal and
+        # when we last made measurable progress. A goal the robot can never reach
+        # (or pose jitter orbiting it) would otherwise loop here forever.
+        best_dist = float("inf")
+        last_progress = time.monotonic()
 
         while not stop_event.is_set() and not state.stop_event.is_set():
             x, y, _ = state.get_pose()
-            if math.hypot(gx - x, gy - y) < config.ARRIVAL_THRESHOLD:
+            dist = math.hypot(gx - x, gy - y)
+            if dist < config.ARRIVAL_THRESHOLD:
                 motors.stop()
                 state.set_log("ok", "Destination reached")
                 return REACHED
+
+            now = time.monotonic()
+            if dist < best_dist - config.NAV_PROGRESS_EPSILON:
+                best_dist = dist
+                last_progress = now
+            elif now - last_progress > config.NAV_PROGRESS_TIMEOUT_S:
+                motors.stop()
+                state.set_log("warn", "No progress toward goal -- abandoning")
+                return NO_PATH
 
             if state.is_blocked():
                 motors.stop()

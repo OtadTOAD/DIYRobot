@@ -19,63 +19,133 @@
   }
   async function getJSON(url) { return (await fetch(url)).json(); }
 
-  // -- status log + mode badge ---------------------------------------------
+  // -- header: status log, mode badge, pose, connection ---------------------
+  const MAX_LOG_LINES = 200;
   function onLog(level, msg) {
     const log = $("log");
     const line = document.createElement("div");
     line.className = "log-" + level;
-    line.textContent = "› " + msg;
+    const t = document.createElement("time");
+    t.textContent = new Date().toLocaleTimeString([], { hour12: false });
+    line.appendChild(t);
+    line.appendChild(document.createTextNode(msg));
     log.appendChild(line);
+    while (log.childElementCount > MAX_LOG_LINES) log.removeChild(log.firstChild);
     log.scrollTop = log.scrollHeight;
   }
   function onMode(mode) {
-    $("modeBadge").textContent = mode;
-    document.querySelectorAll(".modeBtn").forEach((b) => b.classList.remove("active"));
-    const id = { idle: "btnIdle", explore: "btnExplore", navigate: "btnNavigate" }[mode];
-    if (id) $(id).classList.add("active");
+    const badge = $("modeBadge");
+    badge.textContent = mode;
+    badge.className = mode;
+    $("btnIdle").classList.toggle("active", mode === "idle");
+    $("btnExplore").classList.toggle("active", mode === "explore");
   }
-  window.RobotUI = { onLog, onMode };
+  function onPose(p) {
+    const deg = ((p.theta * 180 / Math.PI) % 360).toFixed(0);
+    $("poseReadout").textContent =
+      `x ${p.x.toFixed(2)} m · y ${p.y.toFixed(2)} m · θ ${deg}°`;
+  }
+  function onConnection(up) {
+    $("connDot").classList.toggle("on", up);
+    onLog(up ? "ok" : "warn", up ? "Connected to robot" : "Connection lost");
+  }
+  window.RobotUI = { onLog, onMode, onPose, onConnection };
 
-  // -- mode buttons --------------------------------------------------------
+  // -- mode buttons ----------------------------------------------------------
   $("btnIdle").onclick = () => post("/mode", { mode: "idle" });
   $("btnExplore").onclick = () => post("/mode", { mode: "explore" });
-  $("btnNavigate").onclick = () => onLog("info", "Click the map or pick a waypoint to navigate.");
 
-  // -- destination: click map ----------------------------------------------
+  // -- map clicks: navigate, or forbidden-zone corners when drawing ----------
+  // A single click handler dispatches both, so finishing a zone can never also
+  // fire a navigation request for the same click.
   let drawingZone = false, zoneStart = null;
+
+  function setDrawingZone(on) {
+    drawingZone = on;
+    zoneStart = null;
+    map.setZonePreview(null);
+    $("btnDrawZone").classList.toggle("active", on);
+    $("btnDrawZone").textContent = on ? "Cancel Drawing" : "Draw Zone";
+    $("mapHint").textContent = on
+      ? "Click two opposite corners to draw a forbidden zone (Esc to cancel)."
+      : "Click the map to send the robot there.";
+  }
+
   map.canvas.addEventListener("click", (ev) => {
-    if (drawingZone) return;
-    const rect = map.canvas.getBoundingClientRect();
-    const cell = map.pixelToCell(ev.clientX - rect.left, ev.clientY - rect.top);
+    const cell = map.eventToCell(ev);
+    if (drawingZone) {
+      if (!zoneStart) {
+        zoneStart = cell;
+        $("mapHint").textContent = "Now click the opposite corner.";
+        return;
+      }
+      const z = { x1: zoneStart.x, y1: zoneStart.y, x2: cell.x, y2: cell.y };
+      map.socket.emit("draw_zone", z);
+      map.addZone(z);
+      setDrawingZone(false);
+      return;
+    }
     map.socket.emit("set_destination", { x: cell.x, y: cell.y });
+    map.setDestination(cell);
     onLog("info", `Navigating to cell (${cell.x}, ${cell.y})`);
   });
 
-  // -- destination: waypoint dropdown --------------------------------------
+  map.canvas.addEventListener("mousemove", (ev) => {
+    if (drawingZone && zoneStart) {
+      const cell = map.eventToCell(ev);
+      map.setZonePreview({ x1: zoneStart.x, y1: zoneStart.y, x2: cell.x, y2: cell.y });
+    }
+  });
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && drawingZone) setDrawingZone(false);
+  });
+
+  $("btnDrawZone").onclick = () => setDrawingZone(!drawingZone);
+  $("btnClearZones").onclick = async () => {
+    await post("/forbidden/clear");
+    map.clearZones();
+  };
+
+  // -- destination: waypoint dropdown ----------------------------------------
+  $("waypointSelect").onchange = () => {
+    $("btnGo").disabled = !$("waypointSelect").value;
+  };
   $("btnGo").onclick = () => {
     const name = $("waypointSelect").value;
     if (name) post("/navigate", { waypoint: name });
   };
 
-  // -- waypoints -----------------------------------------------------------
+  // -- waypoints --------------------------------------------------------------
   async function refreshWaypoints() {
     const wp = await getJSON("/waypoints");
     map.setWaypoints(wp);
     const list = $("waypointList");
     const sel = $("waypointSelect");
+    const prev = sel.value;
     list.innerHTML = "";
-    sel.innerHTML = '<option value="">— waypoint —</option>';
-    Object.keys(wp).forEach((name) => {
+    sel.innerHTML = '<option value="">— navigate to waypoint —</option>';
+    const names = Object.keys(wp);
+    if (!names.length) {
+      const li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = "No waypoints yet.";
+      list.appendChild(li);
+    }
+    names.forEach((name) => {
       const li = document.createElement("li");
       li.textContent = name;
       const del = document.createElement("button");
       del.textContent = "🗑";
+      del.title = "Delete waypoint";
       del.onclick = async () => { await post("/waypoints/delete", { name }); refreshWaypoints(); };
       li.appendChild(del);
       list.appendChild(li);
       const opt = document.createElement("option");
       opt.value = name; opt.textContent = name; sel.appendChild(opt);
     });
+    sel.value = names.includes(prev) ? prev : "";
+    $("btnGo").disabled = !sel.value;
   }
   $("btnAddWp").onclick = async () => {
     const name = $("wpName").value.trim();
@@ -84,32 +154,24 @@
     $("wpName").value = "";
     refreshWaypoints();
   };
-
-  // -- forbidden zones -----------------------------------------------------
-  $("btnDrawZone").onclick = () => {
-    drawingZone = true; zoneStart = null;
-    onLog("info", "Click two opposite corners to draw a forbidden zone.");
-  };
-  $("btnClearZones").onclick = async () => { await post("/forbidden/clear"); map.clearZones(); };
-  map.canvas.addEventListener("mousedown", (ev) => {
-    if (!drawingZone) return;
-    const rect = map.canvas.getBoundingClientRect();
-    const cell = map.pixelToCell(ev.clientX - rect.left, ev.clientY - rect.top);
-    if (!zoneStart) { zoneStart = cell; return; }
-    const z = { x1: zoneStart.x, y1: zoneStart.y, x2: cell.x, y2: cell.y };
-    map.socket.emit("draw_zone", z);
-    map.addZone(z);
-    drawingZone = false; zoneStart = null;
+  $("wpName").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") $("btnAddWp").onclick();
   });
 
-  // -- map management ------------------------------------------------------
+  // -- map management ----------------------------------------------------------
   async function refreshMaps() {
     const maps = await getJSON("/map/list");
     const sel = $("mapSelect");
     sel.innerHTML = "";
+    if (!maps.length) {
+      const o = document.createElement("option");
+      o.value = ""; o.textContent = "— no saved maps —";
+      sel.appendChild(o);
+    }
     maps.forEach((m) => {
       const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o);
     });
+    $("btnLoadMap").disabled = !sel.value;
   }
   $("btnLoadMap").onclick = async () => {
     const name = $("mapSelect").value;
@@ -117,7 +179,9 @@
   };
   $("btnSaveMap").onclick = async () => {
     const name = $("mapName").value.trim() || "map";
-    await post("/map/save", { name }); refreshMaps();
+    await post("/map/save", { name });
+    onLog("ok", `Map saved as '${name}'`);
+    refreshMaps();
   };
   $("btnExport").onclick = () => window.open("/map/export", "_blank");
 

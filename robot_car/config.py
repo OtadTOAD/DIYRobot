@@ -124,6 +124,11 @@ REPLAN_RETRY_LIMIT = 3
 REPLAN_WAIT_S = 0.5
 CONTROL_HZ = 20.0               # route-execution control loop rate
 STEER_GAIN = 0.6                # proportional heading correction while driving
+# Stall watchdog: abandon a goal if the robot fails to get measurably closer to
+# it for this long (a goal it can physically never reach, or pose-jitter orbiting
+# the target). Prevents the navigator looping forever "stuck on nothing".
+NAV_PROGRESS_TIMEOUT_S = 8.0
+NAV_PROGRESS_EPSILON = 0.05     # m of goal-distance reduction that counts as progress
 
 # ---------------------------------------------------------------------------
 # SLAM / scan matching
@@ -137,6 +142,14 @@ SCAN_MATCH_THRESHOLD = 0.35     # min normalised score to accept a correction
 
 FRONTIER_FREE_THRESHOLD = 35    # value < this counts as known-free for frontiers
 FRONTIER_MIN_CLUSTER = 3        # ignore frontier blobs smaller than this many cells
+
+# Motion-distortion guard for mapping. A scan is ray-cast as a single instantaneous
+# snapshot, but the SLAM loop runs at ~10 Hz while the robot can turn ~7 deg/cycle
+# in place -- far endpoints then sweep into phantom arcs ("lines") of fake obstacle.
+# Skip integrating a scan when the pose moved/rotated more than this since the last
+# cycle, so mapping only happens when the snapshot is geometrically trustworthy.
+MAP_MAX_ROTATION_PER_SCAN = math.radians(4.0)
+MAP_MAX_TRANSLATION_PER_SCAN = 0.20   # m of per-cycle pose change before skipping
 
 # ---------------------------------------------------------------------------
 # Localization fusion
@@ -155,6 +168,12 @@ CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30
 CAMERA_HZ = 25.0                # processing loop target
+
+# Even under the simulator backend (laptop / dev), prefer a real USB camera if one
+# is actually attached; only fall back to the synthetic feed when no camera is
+# found. Set ROBOT_SIM_CAMERA=synthetic to force the synthetic feed (deterministic
+# tests, headless CI). 'auto' (default) probes for real hardware first.
+SIM_PREFER_REAL_CAMERA = os.environ.get("ROBOT_SIM_CAMERA", "auto") != "synthetic"
 
 # Visual odometry (Shi-Tomasi + Lucas-Kanade)
 VO_MAX_CORNERS = 150

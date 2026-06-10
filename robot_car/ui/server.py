@@ -23,7 +23,7 @@ import time
 
 import cv2
 from flask import Flask, Response, jsonify, request, send_from_directory
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, emit as ws_emit
 
 from robot_car import config, state
 from robot_car.core import safety_monitor
@@ -80,7 +80,7 @@ def create_server(context, controller):
             context.load_map(name)
         except FileNotFoundError:
             return jsonify({"error": "map not found"}), 404
-        _emit_map_base(socketio, context)
+        _emit_map_base(socketio.emit, context)   # broadcast: everyone sees the new map
         return jsonify({"ok": True})
 
     @app.route("/map/save", methods=["POST"])
@@ -169,10 +169,12 @@ def create_server(context, controller):
     # ----- WebSocket --------------------------------------------------------
     @socketio.on("connect")
     def on_connect():
-        _emit_map_base(socketio, context)
-        socketio.emit("mode_change", {"mode": controller.mode})
+        # Inside a handler, flask_socketio.emit targets just the connecting client
+        # rather than broadcasting the snapshot to everyone.
+        _emit_map_base(ws_emit, context)
+        ws_emit("mode_change", {"mode": controller.mode})
         x, y, theta = state.get_pose()
-        socketio.emit("pose_update", {"x": x, "y": y, "theta": theta})
+        ws_emit("pose_update", {"x": x, "y": y, "theta": theta})
 
     @socketio.on("set_destination")
     def on_set_destination(data):
@@ -214,7 +216,7 @@ def _resolve_destination(context, data):
     return None
 
 
-def _emit_map_base(socketio, context):
+def _emit_map_base(emit_fn, context):
     with context.slam._lock:
         png = context.slam.grid.to_png_bytes(inflated=False)
         meta = {
@@ -225,7 +227,7 @@ def _emit_map_base(socketio, context):
             "origin_row": context.slam.grid.origin_row,
         }
     b64 = base64.b64encode(png).decode("ascii")
-    socketio.emit("map_base", {"png": b64, **meta})
+    emit_fn("map_base", {"png": b64, **meta})
 
 
 def _mjpeg_stream():

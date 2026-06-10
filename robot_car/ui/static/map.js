@@ -1,10 +1,11 @@
 /* Map canvas rendering + WebSocket client (F-18).
  *
- * Layers (drawn in order): base occupancy grid, forbidden zones, planned path,
- * named waypoints, robot arrow. The base grid lives on an offscreen 1px-per-cell
- * canvas that incremental `cell_update` events patch in place; the visible canvas is
- * redrawn each animation frame by scaling that offscreen buffer up and overlaying the
- * dynamic layers. Exposes a small `RobotMap` API used by ui.js.
+ * Layers (drawn in order): base occupancy grid, forbidden zones (+ in-progress zone
+ * preview), planned path, destination marker, named waypoints, robot arrow. The base
+ * grid lives on an offscreen 1px-per-cell canvas that incremental `cell_update`
+ * events patch in place; the visible canvas is redrawn each animation frame by
+ * scaling that offscreen buffer up and overlaying the dynamic layers. Exposes a
+ * small `RobotMap` API used by ui.js.
  */
 (function () {
   const socket = io();
@@ -12,7 +13,7 @@
   const ctx = canvas.getContext("2d");
 
   let meta = { width: 200, height: 200, resolution: 0.05, origin_col: 100, origin_row: 100 };
-  let scale = canvas.width / meta.width;          // visible px per cell
+  let scale = canvas.width / meta.width;          // canvas px per cell
 
   // Offscreen base grid (1px per cell).
   const base = document.createElement("canvas");
@@ -22,6 +23,8 @@
   let path = [];                                   // [{x:col,y:row}]
   let waypoints = {};                              // name -> [wx, wy]
   let zones = [];                                  // [{x1,y1,x2,y2}] grid cells
+  let zonePreview = null;                          // {x1,y1,x2,y2} while drawing
+  let destination = null;                          // {x:col,y:row} last clicked goal
 
   function colorForValue(v) {
     if (v < 35) return [240, 240, 240];           // free  -> white
@@ -57,25 +60,44 @@
       row: meta.origin_row - Math.round(wy / meta.resolution),
     };
   }
-  function pixelToCell(px, py) {
-    return { x: Math.floor(px / scale), y: Math.floor(py / scale) };
+  /* Mouse event -> grid cell, accounting for the canvas being CSS-scaled
+   * (its on-screen size is responsive and differs from its 600px buffer). */
+  function eventToCell(ev) {
+    const rect = canvas.getBoundingClientRect();
+    const px = (ev.clientX - rect.left) * (canvas.width / rect.width);
+    const py = (ev.clientY - rect.top) * (canvas.height / rect.height);
+    return {
+      x: Math.max(0, Math.min(meta.width - 1, Math.floor(px / scale))),
+      y: Math.max(0, Math.min(meta.height - 1, Math.floor(py / scale))),
+    };
   }
 
   // -- rendering ------------------------------------------------------------
+  function drawZoneRect(z) {
+    const x = Math.min(z.x1, z.x2) * scale;
+    const y = Math.min(z.y1, z.y2) * scale;
+    const w = (Math.abs(z.x2 - z.x1) + 1) * scale;
+    const h = (Math.abs(z.y2 - z.y1) + 1) * scale;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+  }
+
   function draw() {
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
 
-    // Forbidden zones (semi-transparent red).
+    // Forbidden zones (semi-transparent red) + the one being drawn.
     ctx.fillStyle = "rgba(255,60,60,0.30)";
-    zones.forEach((z) => {
-      const x = Math.min(z.x1, z.x2) * scale;
-      const y = Math.min(z.y1, z.y2) * scale;
-      const w = (Math.abs(z.x2 - z.x1) + 1) * scale;
-      const h = (Math.abs(z.y2 - z.y1) + 1) * scale;
-      ctx.fillRect(x, y, w, h);
-    });
+    ctx.strokeStyle = "rgba(255,60,60,0.6)";
+    ctx.lineWidth = 1;
+    zones.forEach(drawZoneRect);
+    if (zonePreview) {
+      ctx.fillStyle = "rgba(255,60,60,0.15)";
+      ctx.setLineDash([4, 3]);
+      drawZoneRect(zonePreview);
+      ctx.setLineDash([]);
+    }
 
     // Planned path (dashed blue).
     if (path.length > 1) {
@@ -91,6 +113,19 @@
       ctx.setLineDash([]);
     }
 
+    // Destination marker (crosshair ring, pulsing).
+    if (destination) {
+      const px = (destination.x + 0.5) * scale, py = (destination.y + 0.5) * scale;
+      const r = 6 + 2 * Math.sin(performance.now() / 250);
+      ctx.strokeStyle = "#3aa0ff";
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px, py, r, 0, 7); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(px - r - 4, py); ctx.lineTo(px + r + 4, py);
+      ctx.moveTo(px, py - r - 4); ctx.lineTo(px, py + r + 4);
+      ctx.lineWidth = 1; ctx.stroke();
+    }
+
     // Waypoints.
     Object.entries(waypoints).forEach(([name, w]) => {
       const cell = worldToCell(w[0], w[1]);
@@ -101,11 +136,13 @@
       ctx.fillText(name, px + 6, py - 6);
     });
 
-    // Robot arrow.
+    // Robot arrow with a soft halo.
     const cell = worldToCell(pose.x, pose.y);
     const px = (cell.col + 0.5) * scale, py = (cell.row + 0.5) * scale;
     ctx.save();
     ctx.translate(px, py);
+    ctx.fillStyle = "rgba(95,210,138,0.18)";
+    ctx.beginPath(); ctx.arc(0, 0, 14, 0, 7); ctx.fill();
     ctx.rotate(-pose.theta);                       // canvas y is down -> negate
     ctx.fillStyle = "#5fd28a";
     ctx.beginPath();
@@ -118,21 +155,29 @@
   requestAnimationFrame(draw);
 
   // -- socket events --------------------------------------------------------
+  const ui = () => window.RobotUI || {};
+  socket.on("connect", () => ui().onConnection && ui().onConnection(true));
+  socket.on("disconnect", () => ui().onConnection && ui().onConnection(false));
   socket.on("map_base", (m) => { setMeta(m); loadBasePng(m.png); });
   socket.on("cell_update", patchCells);
-  socket.on("pose_update", (p) => { pose = p; });
+  socket.on("pose_update", (p) => { pose = p; ui().onPose && ui().onPose(p); });
   socket.on("path_update", (p) => { path = p; });
-  socket.on("mode_change", (m) => window.RobotUI && window.RobotUI.onMode(m.mode));
-  socket.on("status_log", (l) => window.RobotUI && window.RobotUI.onLog(l.level, l.msg));
+  socket.on("mode_change", (m) => {
+    if (m.mode !== "navigate") destination = null;   // goal done/abandoned
+    ui().onMode && ui().onMode(m.mode);
+  });
+  socket.on("status_log", (l) => ui().onLog && ui().onLog(l.level, l.msg));
 
   // -- public API (used by ui.js) ------------------------------------------
   window.RobotMap = {
     socket,
     canvas,
-    pixelToCell,
+    eventToCell,
     setWaypoints: (w) => { waypoints = w; },
     addZone: (z) => { zones.push(z); },
     clearZones: () => { zones = []; },
+    setZonePreview: (z) => { zonePreview = z; },
+    setDestination: (cell) => { destination = cell; },
     getPose: () => pose,
   };
 })();

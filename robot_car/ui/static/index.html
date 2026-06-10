@@ -6,93 +6,168 @@
   <title>Cargo Robot Control</title>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   <style>
-    :root { --bg:#11151c; --panel:#1b2230; --ink:#e7ecf3; --muted:#8a97ab; --accent:#3aa0ff; }
-    * { box-sizing: border-box; }
-    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--ink); }
-    header { display:flex; align-items:center; justify-content:space-between;
-             padding:10px 16px; background:#0d1117; border-bottom:1px solid #222b3a; }
-    header h1 { font-size:16px; margin:0; }
-    #modeBadge { padding:4px 10px; border-radius:12px; background:#23304a; font-size:13px; }
-    .wrap { display:flex; gap:14px; padding:14px; align-items:flex-start; flex-wrap:wrap; }
-    #mapCanvas { background:#0b0e13; border:1px solid #2a3445; cursor:crosshair; image-rendering:pixelated; }
-    .panel { background:var(--panel); border:1px solid #2a3445; border-radius:8px;
-             padding:12px; width:300px; }
-    .panel h2 { font-size:12px; text-transform:uppercase; color:var(--muted);
-                margin:14px 0 6px; letter-spacing:.05em; }
-    .panel h2:first-child { margin-top:0; }
-    button { background:#26344e; color:var(--ink); border:1px solid #3a4a66;
-             border-radius:6px; padding:6px 10px; cursor:pointer; font-size:13px; }
-    button:hover { background:#33415f; }
+    :root {
+      --bg:#0e1219; --panel:#161d29; --panel2:#1b2434; --ink:#e7ecf3; --muted:#8a97ab;
+      --line:#27324a; --accent:#3aa0ff; --ok:#5fd28a; --warn:#e2c14e; --err:#ff6b6b;
+    }
+    * { box-sizing:border-box; }
+    html, body { height:100%; }
+    body { margin:0; font-family:system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+
+    header {
+      position:sticky; top:0; z-index:10;
+      display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+      padding:10px 16px; background:#0a0e15; border-bottom:1px solid var(--line);
+    }
+    header h1 { font-size:16px; margin:0; flex:1; white-space:nowrap; }
+    #connDot { width:9px; height:9px; border-radius:50%; background:var(--err);
+               transition:background .3s; flex:none; }
+    #connDot.on { background:var(--ok); box-shadow:0 0 6px var(--ok); }
+    #poseReadout { font-family:ui-monospace, monospace; font-size:12px; color:var(--muted); }
+    #modeBadge {
+      padding:4px 12px; border-radius:12px; font-size:13px; font-weight:600;
+      text-transform:capitalize; background:#23304a; transition:background .3s, color .3s;
+    }
+    #modeBadge.idle     { background:#2a3550; color:var(--muted); }
+    #modeBadge.explore  { background:#3d3517; color:var(--warn); }
+    #modeBadge.navigate { background:#143a5e; color:var(--accent); }
+
+    .wrap {
+      display:grid; grid-template-columns:minmax(0,1fr) 340px;
+      gap:14px; padding:14px; max-width:1400px; margin:0 auto;
+    }
+    @media (max-width: 900px) { .wrap { grid-template-columns:1fr; } }
+
+    #mapCard { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+               padding:10px; align-self:start; }
+    #mapCanvas {
+      display:block; width:100%; aspect-ratio:1/1; max-height:80vh; margin:0 auto;
+      background:#0b0e13; border:1px solid var(--line); border-radius:6px;
+      cursor:crosshair; image-rendering:pixelated; touch-action:manipulation;
+    }
+    #mapHint { color:var(--muted); font-size:12px; margin:8px 2px 0; min-height:1.2em; }
+
+    .panel { display:flex; flex-direction:column; gap:10px; min-width:0; }
+    section { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+              padding:12px; }
+    section h2 {
+      font-size:11px; text-transform:uppercase; color:var(--muted);
+      margin:0 0 8px; letter-spacing:.08em;
+    }
+    .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+    .row + .row, .row + ul { margin-top:8px; }
+
+    button {
+      background:var(--panel2); color:var(--ink); border:1px solid #3a4a66;
+      border-radius:6px; padding:7px 12px; cursor:pointer; font-size:13px;
+      transition:background .15s, border-color .15s, transform .05s;
+    }
+    button:hover:not(:disabled) { background:#2a3955; border-color:#4a5d80; }
+    button:active:not(:disabled) { transform:scale(.97); }
+    button:disabled { opacity:.45; cursor:default; }
     button.active { background:var(--accent); border-color:var(--accent); color:#04101f; }
-    .row { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px; }
-    input, select { background:#0e131c; color:var(--ink); border:1px solid #3a4a66;
-                    border-radius:6px; padding:5px 7px; font-size:13px; }
-    ul { list-style:none; margin:0; padding:0; }
-    li { display:flex; justify-content:space-between; align-items:center;
-         padding:4px 0; border-bottom:1px solid #232c3c; font-size:13px; }
-    #log { height:150px; overflow-y:auto; background:#0a0d12; border:1px solid #232c3c;
-           border-radius:6px; padding:6px; font-family:monospace; font-size:12px; }
-    .log-ok{color:#5fd28a} .log-warn{color:#e2c14e} .log-error{color:#ff6b6b} .log-info{color:#8aa0c0}
-    #camWrap img { width:300px; border:1px solid #2a3445; border-radius:6px; background:#000; }
+    button.danger:hover:not(:disabled) { background:#4a2026; border-color:var(--err); color:#ffb3b3; }
+    .modeBtn { flex:1; }
+
+    input, select {
+      background:#0e131c; color:var(--ink); border:1px solid #3a4a66;
+      border-radius:6px; padding:6px 8px; font-size:13px; min-width:0;
+    }
+    input:focus, select:focus { outline:none; border-color:var(--accent); }
+    select { flex:1; }
+    input { flex:1; }
+
+    ul { list-style:none; margin:0; padding:0; max-height:160px; overflow-y:auto; }
+    li { display:flex; justify-content:space-between; align-items:center; gap:6px;
+         padding:4px 2px; border-bottom:1px solid var(--line); font-size:13px; }
+    li:last-child { border-bottom:none; }
+    li button { padding:2px 8px; font-size:12px; }
+    .empty { color:var(--muted); font-size:12px; padding:4px 2px; }
+
+    #camWrap { position:relative; }
+    #camWrap img { display:block; width:100%; border:1px solid var(--line);
+                   border-radius:6px; background:#000; min-height:60px; }
+
+    #log { height:170px; overflow-y:auto; background:#0a0d12; border:1px solid var(--line);
+           border-radius:6px; padding:6px 8px; font-family:ui-monospace, monospace;
+           font-size:12px; line-height:1.5; }
+    #log time { color:#56627a; margin-right:6px; }
+    .log-ok{color:var(--ok)} .log-warn{color:var(--warn)}
+    .log-error{color:var(--err)} .log-info{color:#8aa0c0}
     small { color:var(--muted); }
   </style>
 </head>
 <body>
   <header>
+    <span id="connDot" title="connection"></span>
     <h1>🤖 Cargo Robot Control</h1>
-    <span id="modeBadge">idle</span>
+    <span id="poseReadout">x 0.00 m · y 0.00 m · θ 0°</span>
+    <span id="modeBadge" class="idle">idle</span>
   </header>
 
   <div class="wrap">
-    <canvas id="mapCanvas" width="600" height="600"></canvas>
+    <div id="mapCard">
+      <canvas id="mapCanvas" width="600" height="600"></canvas>
+      <div id="mapHint">Click the map to send the robot there.</div>
+    </div>
 
     <div class="panel">
-      <h2>Mode</h2>
-      <div class="row">
-        <button id="btnIdle" class="modeBtn">Idle</button>
-        <button id="btnExplore" class="modeBtn">Explore</button>
-        <button id="btnNavigate" class="modeBtn">Navigate</button>
-      </div>
-      <small>Click the map to set a destination, or pick a waypoint below.</small>
+      <section>
+        <h2>Mode</h2>
+        <div class="row">
+          <button id="btnIdle" class="modeBtn">Idle / Stop</button>
+          <button id="btnExplore" class="modeBtn">Explore</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <select id="waypointSelect"><option value="">— navigate to waypoint —</option></select>
+          <button id="btnGo" disabled>Go</button>
+        </div>
+      </section>
 
-      <h2>Destination</h2>
-      <div class="row">
-        <select id="waypointSelect"><option value="">— waypoint —</option></select>
-        <button id="btnGo">Go</button>
-      </div>
+      <section>
+        <h2>Waypoints</h2>
+        <div class="row">
+          <input id="wpName" placeholder="name" />
+          <button id="btnAddWp" title="Save the robot's current position">+ Add here</button>
+        </div>
+        <ul id="waypointList"></ul>
+      </section>
 
-      <h2>Waypoints</h2>
-      <div class="row">
-        <input id="wpName" placeholder="name" size="10" />
-        <button id="btnAddWp">+ Add (here)</button>
-      </div>
-      <ul id="waypointList"></ul>
+      <section>
+        <h2>Forbidden Zones</h2>
+        <div class="row">
+          <button id="btnDrawZone">Draw Zone</button>
+          <button id="btnClearZones" class="danger">Clear All</button>
+        </div>
+      </section>
 
-      <h2>Forbidden Zones</h2>
-      <div class="row">
-        <button id="btnDrawZone">Draw Zone</button>
-        <button id="btnClearZones">Clear All</button>
-      </div>
+      <section>
+        <h2>Maps</h2>
+        <div class="row">
+          <select id="mapSelect"></select>
+          <button id="btnLoadMap">Load</button>
+        </div>
+        <div class="row">
+          <input id="mapName" placeholder="map name" />
+          <button id="btnSaveMap">Save</button>
+          <button id="btnExport">PNG</button>
+        </div>
+      </section>
 
-      <h2>Maps</h2>
-      <div class="row">
-        <select id="mapSelect"></select>
-        <button id="btnLoadMap">Load</button>
-      </div>
-      <div class="row">
-        <input id="mapName" placeholder="map name" size="10" />
-        <button id="btnSaveMap">Save</button>
-        <button id="btnExport">Export PNG</button>
-      </div>
+      <section>
+        <h2>Safety</h2>
+        <div class="row"><button id="btnAck">Acknowledge Drop</button></div>
+      </section>
 
-      <h2>Safety</h2>
-      <div class="row"><button id="btnAck">Acknowledge Drop</button></div>
+      <section>
+        <h2>Camera Debug</h2>
+        <div id="camWrap"><img id="camImg" alt="camera debug" /></div>
+      </section>
 
-      <h2>Camera Debug</h2>
-      <div id="camWrap"><img id="camImg" alt="camera debug" /></div>
-
-      <h2>Status Log</h2>
-      <div id="log"></div>
+      <section>
+        <h2>Status Log</h2>
+        <div id="log"></div>
+      </section>
     </div>
   </div>
 

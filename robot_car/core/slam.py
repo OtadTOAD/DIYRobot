@@ -30,6 +30,11 @@ from robot_car.core.odometry import Odometry
 from robot_car.hardware import sensors
 
 
+def _wrap(angle: float) -> float:
+    """Wrap an angle to (-pi, pi]."""
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+
 # ---------------------------------------------------------------------------
 # Scan matching (pure, testable)
 # ---------------------------------------------------------------------------
@@ -117,6 +122,7 @@ class SlamSystem(threading.Thread):
         self.mapping = mapping
         self._lock = threading.RLock()
         self.cell_listener = None    # optional callback(list_of_(col,row,value))
+        self._prev_pose = None       # fused pose last cycle, for the motion guard
 
     def set_mapping(self, enabled: bool) -> None:
         with self._lock:
@@ -153,13 +159,29 @@ class SlamSystem(threading.Thread):
         self.odometry.set_pose(fused)
         state.set_pose(fused)
 
-        if self.mapping:
+        if self.mapping and self._scan_motion_ok(self._prev_pose, fused):
             with self._lock:
                 touched = self.grid.integrate_scan(fused, distances)
                 grid_uint8 = self.grid.to_uint8()
             state.set_grid(grid_uint8)
             self._emit_cells(touched, grid_uint8)
+        self._prev_pose = fused
         return fused
+
+    @staticmethod
+    def _scan_motion_ok(prev_pose, pose) -> bool:
+        """True when little enough happened since last cycle to trust the snapshot.
+
+        A scan is ray-cast as one instantaneous geometry; if the robot swung through
+        a large angle (in-place turn) between 10 Hz cycles, far endpoints smear into
+        phantom arcs of obstacle. Skipping those cycles keeps the map clean.
+        """
+        if prev_pose is None:
+            return True
+        d_trans = math.hypot(pose[0] - prev_pose[0], pose[1] - prev_pose[1])
+        d_rot = abs(_wrap(pose[2] - prev_pose[2]))
+        return (d_rot <= config.MAP_MAX_ROTATION_PER_SCAN and
+                d_trans <= config.MAP_MAX_TRANSLATION_PER_SCAN)
 
     def _vo_to_pose(self, base_pose, vo_delta):
         """Apply the world-frame VO delta to the base pose (theta from delta too)."""
