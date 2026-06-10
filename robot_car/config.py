@@ -81,8 +81,13 @@ SENSOR_MOUNT_HEIGHT_CM = 12.0   # horizontal sensors mounted ~12 cm up
 # ---------------------------------------------------------------------------
 # Safety thresholds
 # ---------------------------------------------------------------------------
-STOP_THRESHOLD_CM = 18.0        # horizontal obstacle -> emergency stop
-ADVISORY_TIGHTEN_CM = 8.0       # extra margin added when camera advisory is set
+SAFETY_HZ = 10.0                # monitor loop rate (5 blocking sensor reads/cycle)
+STOP_THRESHOLD_CM = 18.0        # obstacle ahead (direction of travel) -> stop
+ADVISORY_TIGHTEN_CM = 8.0       # extra front margin when camera advisory is set
+# Left/right/back only block when a collision is imminent. Distances are measured
+# from the robot centre, and planned paths legitimately skirt walls at ~SIDE+ range;
+# sharing the front threshold would freeze the robot beside every wall.
+SIDE_STOP_THRESHOLD_CM = 14.0   # ROBOT_RADIUS (12 cm) + 2 cm gap
 DROP_NORMAL_CM = 15.0           # expected downward reading on flat floor
 DROP_FLOOR_GONE_CM = 23.0       # > this -> floor disappeared (cliff)
 DROP_OBSTACLE_CM = 7.0          # < this -> obstacle directly below/front
@@ -109,8 +114,10 @@ LOG_ODDS_CLAMP = 10.0
 P_FREE = 0.30                   # evidence for a cell along the beam
 P_OCCUPIED = 0.70               # evidence for the beam endpoint cell
 
-# Obstacle inflation: 2 cells * 5 cm = 10 cm safety margin
-INFLATION_ITERATIONS = 2
+# Obstacle inflation must cover the robot radius plus a margin, or A* plans paths
+# the chassis cannot actually fit through.
+INFLATION_MARGIN_M = 0.03
+INFLATION_ITERATIONS = math.ceil((ROBOT_RADIUS + INFLATION_MARGIN_M) / MAP_RESOLUTION)
 INFLATION_OCCUPIED_THRESHOLD = 65   # cells above this are "confirmed occupied"
 
 # ---------------------------------------------------------------------------
@@ -161,19 +168,14 @@ SLIP_THRESHOLD = 0.02           # m of commanded motion to test for slip
 SLIP_ENCODER_PENALTY = 0.5      # encoder confidence multiplier on detected slip
 
 # ---------------------------------------------------------------------------
-# Camera
+# Camera -- sized for the Raspberry Pi 2 CPU budget (VO + Canny on every frame;
+# 640x480 @ 25 Hz is a Pi 4 workload).
 # ---------------------------------------------------------------------------
 CAMERA_INDEX = 0
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
-CAMERA_FPS = 30
-CAMERA_HZ = 25.0                # processing loop target
-
-# Even under the simulator backend (laptop / dev), prefer a real USB camera if one
-# is actually attached; only fall back to the synthetic feed when no camera is
-# found. Set ROBOT_SIM_CAMERA=synthetic to force the synthetic feed (deterministic
-# tests, headless CI). 'auto' (default) probes for real hardware first.
-SIM_PREFER_REAL_CAMERA = os.environ.get("ROBOT_SIM_CAMERA", "auto") != "synthetic"
+CAMERA_WIDTH = 320
+CAMERA_HEIGHT = 240
+CAMERA_FPS = 15
+CAMERA_HZ = 10.0                # processing loop target
 
 # Visual odometry (Shi-Tomasi + Lucas-Kanade)
 VO_MAX_CORNERS = 150
@@ -194,7 +196,7 @@ APPEARANCE_ROI_TOP = 0.55       # analyse from 55% down to the bottom of frame
 APPEARANCE_BLUR = (5, 5)
 APPEARANCE_CANNY_LOW = 50
 APPEARANCE_CANNY_HIGH = 150
-APPEARANCE_MIN_CONTOUR_AREA = 1500
+APPEARANCE_MIN_CONTOUR_AREA = 375   # px^2 at 320x240 (scale with frame area)
 
 # Debug view
 SHOW_CAMERA_WINDOW = os.environ.get("SHOW_CAMERA_WINDOW", "0") == "1"

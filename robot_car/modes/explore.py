@@ -13,19 +13,18 @@ import math
 import time
 
 import numpy as np
-from scipy.ndimage import binary_dilation, center_of_mass, label
+from scipy.ndimage import center_of_mass, label
 
 from robot_car import config, state
 from robot_car.core import path_planner as pp
+from robot_car.core.slam import frontier_mask
 from robot_car.hardware import motors
-from robot_car.modes.navigate import Navigator, REACHED, NO_PATH, ABORTED
+from robot_car.modes.navigate import Navigator, NO_PATH, ABORTED
 
 
 def cluster_frontiers(grid_uint8: np.ndarray):
     """Return (col, row) centroids of connected frontier regions, largest first."""
-    free = grid_uint8 < config.FRONTIER_FREE_THRESHOLD
-    unknown = grid_uint8 == config.GRID_UNKNOWN
-    mask = free & binary_dilation(unknown)
+    mask = frontier_mask(grid_uint8)
     labelled, n = label(mask)
     if n == 0:
         return []

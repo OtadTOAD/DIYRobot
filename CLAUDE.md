@@ -5,7 +5,8 @@ reference; the original design rationale lives in the seven `*.md` docs at the r
 
 ## What this is
 
-A classical-AI autonomous indoor cargo robot for the Raspberry Pi 4B, implemented in
+A classical-AI autonomous indoor cargo robot for the Raspberry Pi 2 (any newer Pi
+also works; the design docs predate the board swap and say 4B), implemented in
 Python under `robot_car/`. It does occupancy-grid SLAM, three-source localization
 fusion, A* navigation, reactive safety, USB-camera visual odometry + appearance
 detection, and a Flask/SocketIO web UI — entirely onboard, no ROS, no neural nets.
@@ -86,6 +87,10 @@ Shared state and locks live only in `state.py`; use its accessor helpers.
 - **Camera = USB / UVC** (`cv2.VideoCapture`), not the Pi CSI module — matches
   `camera_integration_design.md`; the other docs were reconciled to agree.
 - **Motors = 4×AA 6 V** (TT motors max 6 V), not 7.4 V.
+- **Target board = Raspberry Pi 2**, so CPU-bound rates are budgeted accordingly:
+  camera 320×240 @ 10 Hz, safety 10 Hz. The GPIO pin map is unchanged (12/13 are
+  hardware-PWM on every 40-pin Pi). The wiring notes' USB-C power remark is
+  Pi-4-era — the Pi 2 powers over **Micro-USB**.
 - **Inflation is applied at plan time** (`OccupancyGrid.planning_grid`) so scan matching
   still runs against true (un-inflated) walls; the saved `.map` holds the base grid.
 - **Forbidden zones** are a separate boolean layer saved as `.zones` beside the `.map`.

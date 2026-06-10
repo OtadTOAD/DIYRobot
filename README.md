@@ -1,6 +1,6 @@
 # AI Cargo Robot 🤖
 
-A small autonomous indoor cargo robot for the **Raspberry Pi 4B** — built on classical
+A small autonomous indoor cargo robot for the **Raspberry Pi 2** (docs mention 4B; any 40-pin Pi works) — built on classical
 AI, no ROS and no neural networks. It explores and maps an unknown room, localizes
 itself, and drives to user-selected destinations while avoiding obstacles and floor
 drops. A web UI shows the live map and lets you click-to-navigate.
@@ -11,7 +11,7 @@ hardware.
 
 | | |
 |---|---|
-| Platform | Raspberry Pi 4B (or any Linux machine, via simulator) |
+| Platform | Raspberry Pi 2 (or any Linux machine, via simulator) |
 | Language | Python 3 |
 | Navigation | Occupancy-grid SLAM + A* path planning |
 | Localization | Encoder dead-reckoning + scan matching + visual odometry (weighted fusion) |

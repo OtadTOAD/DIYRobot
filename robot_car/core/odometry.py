@@ -1,8 +1,8 @@
 """Encoder dead-reckoning odometry (F-04).
 
 Differential-drive kinematics from wheel pulse counts. The LM393 encoders are
-single-channel and cannot report direction, so the sign of each wheel's travel is
-taken from the last motor command (see hardware/motors.get_last_command).
+single-channel and cannot report direction; pulses arrive already signed by the
+motor command active when they were produced (see hardware/motors).
 
 An :class:`Odometry` instance maintains the encoder-only pose estimate. The SLAM /
 localization thread owns one instance, calls :meth:`update` once per cycle, and
@@ -13,15 +13,8 @@ motion estimate" of the localization stack.
 import math
 
 from robot_car import config
-from robot_car.hardware import hal, motors
-
-
-def _sign(value: float) -> float:
-    if value > 1e-6:
-        return 1.0
-    if value < -1e-6:
-        return -1.0
-    return 1.0  # coasting with no command -> assume forward
+from robot_car.core.geometry import wrap_angle
+from robot_car.hardware import motors
 
 
 class Odometry:
@@ -37,11 +30,9 @@ class Odometry:
 
     def update(self) -> tuple:
         """Consume encoder pulses and advance the pose. Returns the new pose."""
-        left_pulses, right_pulses = hal.get_backend().read_encoder_pulses()
-        cmd_left, cmd_right = motors.get_last_command()
-
-        delta_left = _sign(cmd_left) * left_pulses * config.DIST_PER_PULSE
-        delta_right = _sign(cmd_right) * right_pulses * config.DIST_PER_PULSE
+        left_pulses, right_pulses = motors.consume_signed_pulses()
+        delta_left = left_pulses * config.DIST_PER_PULSE
+        delta_right = right_pulses * config.DIST_PER_PULSE
 
         delta_c = (delta_left + delta_right) / 2.0
         delta_theta = (delta_right - delta_left) / config.WHEEL_BASE
@@ -50,11 +41,6 @@ class Odometry:
         mid = self.theta + delta_theta / 2.0
         self.x += delta_c * math.cos(mid)
         self.y += delta_c * math.sin(mid)
-        self.theta = _wrap(self.theta + delta_theta)
+        self.theta = wrap_angle(self.theta + delta_theta)
         self.last_distance = abs(delta_c)
         return (self.x, self.y, self.theta)
-
-
-def _wrap(angle: float) -> float:
-    """Wrap an angle to (-pi, pi]."""
-    return (angle + math.pi) % (2 * math.pi) - math.pi

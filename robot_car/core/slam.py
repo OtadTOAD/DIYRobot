@@ -4,7 +4,7 @@ A ~10 Hz daemon thread that, each cycle:
   1. advances the encoder odometry (dead reckoning),
   2. reads the ultrasonic sensors,
   3. refines the pose with correlation-window scan matching against the map,
-  4. pulls the latest visual-odometry delta,
+  4. consumes the visual-odometry delta accumulated since the last cycle,
   5. fuses all three into the published robot pose (localization.py),
   6. feeds the fused pose back into odometry (correction), and
   7. ray-casts the readings into the occupancy grid.
@@ -25,14 +25,10 @@ from scipy.ndimage import binary_dilation
 
 from robot_car import config, state
 from robot_car.core import localization
+from robot_car.core.geometry import wrap_angle
 from robot_car.core.occupancy_grid import OccupancyGrid
 from robot_car.core.odometry import Odometry
 from robot_car.hardware import sensors
-
-
-def _wrap(angle: float) -> float:
-    """Wrap an angle to (-pi, pi]."""
-    return (angle + math.pi) % (2 * math.pi) - math.pi
 
 
 # ---------------------------------------------------------------------------
@@ -101,13 +97,16 @@ def scan_match(grid: OccupancyGrid, grid_uint8, pose, distances):
 # ---------------------------------------------------------------------------
 # Frontier detection (pure, testable)
 # ---------------------------------------------------------------------------
-def find_frontiers(grid_uint8: np.ndarray):
-    """Return (col, row) of known-free cells adjacent to unknown space."""
+def frontier_mask(grid_uint8: np.ndarray) -> np.ndarray:
+    """Boolean mask of known-free cells adjacent to unknown space."""
     free = grid_uint8 < config.FRONTIER_FREE_THRESHOLD
     unknown = grid_uint8 == config.GRID_UNKNOWN
-    unknown_dilated = binary_dilation(unknown)
-    frontier_mask = free & unknown_dilated
-    rows, cols = np.nonzero(frontier_mask)
+    return free & binary_dilation(unknown)
+
+
+def find_frontiers(grid_uint8: np.ndarray):
+    """Return (col, row) of known-free cells adjacent to unknown space."""
+    rows, cols = np.nonzero(frontier_mask(grid_uint8))
     return list(zip(cols.tolist(), rows.tolist()))
 
 
@@ -141,6 +140,7 @@ class SlamSystem(threading.Thread):
 
     def step(self) -> tuple:
         """One SLAM/localization cycle. Returns the fused pose."""
+        base_pose = self.odometry.get_pose()
         enc_pose = self.odometry.update()
         distances = sensors.get_all_distances()
 
@@ -148,8 +148,13 @@ class SlamSystem(threading.Thread):
         scan_pose, scan_score = scan_match(self.grid, grid_uint8, enc_pose, distances)
         scan_accepted = scan_score >= config.SCAN_MATCH_THRESHOLD
 
-        vo_delta, vo_conf = state.get_vo()
-        vo_pose = self._vo_to_pose(enc_pose, vo_delta)
+        # The VO delta covers the same interval as the encoder update, so it is
+        # applied to the pose from *before* that update -- applying it on top of
+        # enc_pose would count the cycle's motion twice.
+        vo_delta, vo_conf = state.consume_vo()
+        vo_pose = (base_pose[0] + vo_delta[0],
+                   base_pose[1] + vo_delta[1],
+                   base_pose[2] + vo_delta[2])
         slip = localization.detect_slip(self.odometry.last_distance, vo_delta, vo_conf)
 
         w_e, w_s, w_v = localization.compute_weights(scan_score, scan_accepted, vo_conf, slip)
@@ -179,15 +184,9 @@ class SlamSystem(threading.Thread):
         if prev_pose is None:
             return True
         d_trans = math.hypot(pose[0] - prev_pose[0], pose[1] - prev_pose[1])
-        d_rot = abs(_wrap(pose[2] - prev_pose[2]))
+        d_rot = abs(wrap_angle(pose[2] - prev_pose[2]))
         return (d_rot <= config.MAP_MAX_ROTATION_PER_SCAN and
                 d_trans <= config.MAP_MAX_TRANSLATION_PER_SCAN)
-
-    def _vo_to_pose(self, base_pose, vo_delta):
-        """Apply the world-frame VO delta to the base pose (theta from delta too)."""
-        return (base_pose[0] + vo_delta[0],
-                base_pose[1] + vo_delta[1],
-                base_pose[2] + vo_delta[2])
 
     def _emit_cells(self, touched, grid_uint8):
         if not self.cell_listener or not touched:

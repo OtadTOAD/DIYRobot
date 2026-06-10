@@ -250,10 +250,10 @@ class World:
             # A solid object with a continuous high-contrast silhouette low-centre,
             # so the appearance detector sees a closed contour regardless of the
             # floor texture behind it (a real obstacle has a continuous edge).
-            y0 = int(h * 0.7)
-            x0 = w // 2 - 60
-            frame[y0:y0 + 80, x0:x0 + 120] = (20, 20, 20)
-            cv2.rectangle(frame, (x0, y0), (x0 + 120, y0 + 80), (240, 240, 240), 3)
+            bw, bh = w // 4, h // 5
+            x0, y0 = (w - bw) // 2, int(h * 0.7)
+            frame[y0:y0 + bh, x0:x0 + bw] = (20, 20, 20)
+            cv2.rectangle(frame, (x0, y0), (x0 + bw, y0 + bh), (240, 240, 240), 3)
         return frame
 
     # -- lifecycle -----------------------------------------------------------

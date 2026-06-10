@@ -9,14 +9,17 @@ os.environ.setdefault("ROBOT_BACKEND", "sim")
 
 from robot_car import state           # noqa: E402
 from robot_car.core import simulator  # noqa: E402
+from robot_car.hardware import motors  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def clean_state():
     """Reset shared state before and after every test."""
     state.reset()
+    motors.reset()
     yield
     state.reset()
+    motors.reset()
 
 
 @pytest.fixture

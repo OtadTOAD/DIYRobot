@@ -28,6 +28,18 @@ def test_state_accessors_roundtrip():
     assert state.get_mode() == "explore"
 
 
+def test_vo_accumulates_then_consumes_once():
+    state.add_vo((0.01, 0.0, 0.10), 0.8)
+    state.add_vo((0.02, 0.0, -0.05), 0.6)
+    delta, conf = state.consume_vo()
+    assert math.isclose(delta[0], 0.03) and math.isclose(delta[2], 0.05)
+    assert conf == 0.6
+    # A second consume returns nothing: deltas are never applied twice and a
+    # stalled camera decays to zero confidence.
+    delta, conf = state.consume_vo()
+    assert delta == (0.0, 0.0, 0.0) and conf == 0.0
+
+
 def test_sim_world_raycast_sees_walls():
     world = simulator.reset_world(world_name="empty", start_pose=(0.0, 0.0, 0.0))
     # 'empty' room spans -2..2 m; front sensor points +x toward the wall at x=2.

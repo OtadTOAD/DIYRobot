@@ -6,10 +6,13 @@ and raises ``state.blocked`` directly, so a bug in the planner can never disable
 collision avoidance.
 
 Responsibilities:
-  * Horizontal obstacle stop  -- any of front/left/right/back below the stop
-    threshold (tightened when the camera advisory flag is set).
-  * Frontal recovery          -- reverse briefly then pivot away so navigation can
-    retry from a clear-ish pose.
+  * Frontal stop + recovery   -- front reading below the stop threshold (tightened
+    when the camera advisory flag is set): stop, reverse briefly, pivot away so
+    navigation can retry from a clear-ish pose.
+  * Side / back scrape stop    -- left/right/back below the (much tighter)
+    collision-imminent threshold: stop and pivot away from the closest side.
+    Every block must end in a recovery that unblocks -- a stationary hold next to
+    a wall would deadlock navigation forever, since the wall never moves.
   * Drop / cliff detection     -- downward sensor reading above the "floor gone"
     threshold latches an emergency stop that requires manual acknowledgement from
     the web UI; below the "obstacle below" threshold triggers stop-and-reverse.
@@ -44,24 +47,24 @@ def evaluate(distances: dict, advisory: bool, latched: bool) -> str:
     if down < config.DROP_OBSTACLE_CM:
         return DROP_OBSTACLE
 
-    threshold = config.STOP_THRESHOLD_CM
+    front_threshold = config.STOP_THRESHOLD_CM
     if advisory:
-        threshold += config.ADVISORY_TIGHTEN_CM
+        front_threshold += config.ADVISORY_TIGHTEN_CM
 
-    if distances.get("front", float("inf")) < threshold:
+    if distances.get("front", float("inf")) < front_threshold:
         return BLOCK_FRONT
     sides = min(
         distances.get("left", float("inf")),
         distances.get("right", float("inf")),
         distances.get("back", float("inf")),
     )
-    if sides < threshold:
+    if sides < config.SIDE_STOP_THRESHOLD_CM:
         return BLOCK_SIDE
     return CLEAR
 
 
 class SafetyMonitor(threading.Thread):
-    def __init__(self, hz: float = 20.0):
+    def __init__(self, hz: float = config.SAFETY_HZ):
         super().__init__(name="safety", daemon=True)
         self.period = 1.0 / hz
 
@@ -69,11 +72,11 @@ class SafetyMonitor(threading.Thread):
         while not state.stop_event.is_set():
             distances = sensors.get_all_distances()
             decision = evaluate(distances, state.get_advisory(), state.is_drop_latched())
-            self._act(decision)
+            self._act(decision, distances)
             time.sleep(self.period)
 
     # -- actions -------------------------------------------------------------
-    def _act(self, decision: str) -> None:
+    def _act(self, decision: str, distances: dict | None = None) -> None:
         if decision == CLEAR:
             state.set_blocked(False)
             return
@@ -93,9 +96,18 @@ class SafetyMonitor(threading.Thread):
             self._pivot()
             state.set_blocked(False)                # allow navigation to retry
         elif decision == BLOCK_SIDE:
-            pass                                    # hold until the side clears
+            self._recover_side(distances or {})
+            state.set_blocked(False)
         elif decision == LATCHED:
             pass                                    # frozen until acknowledged
+
+    def _recover_side(self, distances: dict) -> None:
+        """Pivot away from the closest side; a back reading clears by itself when
+        navigation resumes driving forward."""
+        left = distances.get("left", float("inf"))
+        right = distances.get("right", float("inf"))
+        if min(left, right) < distances.get("back", float("inf")):
+            self._pivot(direction=1 if left < right else -1)
 
     def _sleep_or_abort(self, seconds: float) -> None:
         """Sleep, but bail out immediately on shutdown."""
@@ -106,9 +118,9 @@ class SafetyMonitor(threading.Thread):
         self._sleep_or_abort(config.SAFETY_REVERSE_TIME_S)
         motors.stop()
 
-    def _pivot(self) -> None:
-        # Pivot in place away from the obstacle (turn right by default).
-        motors.set_speed(config.TURN_SPEED, -config.TURN_SPEED)
+    def _pivot(self, direction: int = 1) -> None:
+        """Pivot in place; +1 turns right (clockwise), -1 turns left."""
+        motors.set_speed(direction * config.TURN_SPEED, -direction * config.TURN_SPEED)
         self._sleep_or_abort(config.SAFETY_PIVOT_TIME_S)
         motors.stop()
 

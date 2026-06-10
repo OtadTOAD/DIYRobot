@@ -36,8 +36,6 @@ def create_server(context, controller):
     app = Flask(__name__, static_folder=_STATIC, static_url_path="/static")
     socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
-    grid = context.slam.grid
-
     # ----- wiring core -> websocket ----------------------------------------
     state.add_log_listener(
         lambda level, msg: socketio.emit("status_log", {"level": level, "msg": msg})

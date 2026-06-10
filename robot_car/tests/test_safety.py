@@ -21,9 +21,13 @@ def test_evaluate_front_block():
     assert sm.evaluate(d, advisory=False, latched=False) == sm.BLOCK_FRONT
 
 
-def test_evaluate_side_block():
-    d = _dist(left=config.STOP_THRESHOLD_CM - 1)
+def test_evaluate_side_block_only_when_collision_imminent():
+    d = _dist(left=config.SIDE_STOP_THRESHOLD_CM - 1)
     assert sm.evaluate(d, advisory=False, latched=False) == sm.BLOCK_SIDE
+    # Skirting a wall at front-threshold range must NOT block -- planned paths
+    # legitimately run this close, and a side hold would deadlock navigation.
+    d = _dist(left=config.STOP_THRESHOLD_CM - 1)
+    assert sm.evaluate(d, advisory=False, latched=False) == sm.CLEAR
 
 
 def test_advisory_tightens_threshold():

@@ -13,16 +13,13 @@ import time
 
 from robot_car import config, state
 from robot_car.core import path_planner as pp
+from robot_car.core.geometry import wrap_angle
 from robot_car.hardware import motors
 
 # Run status codes.
 REACHED = "reached"
 NO_PATH = "no_path"
 ABORTED = "aborted"
-
-
-def _wrap(angle: float) -> float:
-    return (angle + math.pi) % (2 * math.pi) - math.pi
 
 
 class Navigator:
@@ -89,7 +86,6 @@ class Navigator:
                     state.set_log("warn", "Obstacle persists -- replanning")
                     if self.plan(goal_cell) is None:
                         return NO_PATH
-                    gx, gy = self.ctx.grid_to_world(*goal_cell)
                     idx, retry = 1, 0
                 stop_event.wait(config.REPLAN_WAIT_S)
                 continue
@@ -111,7 +107,7 @@ class Navigator:
         if math.hypot(dx, dy) < config.ARRIVAL_THRESHOLD:
             return REACHED
 
-        err = _wrap(math.atan2(dy, dx) - theta)
+        err = wrap_angle(math.atan2(dy, dx) - theta)
         if abs(err) > config.HEADING_TOLERANCE:
             turn = config.TURN_SPEED * (1.0 if err > 0 else -1.0)
             motors.set_speed(-turn, turn)            # rotate in place (+err => CCW)

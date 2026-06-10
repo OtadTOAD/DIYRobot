@@ -144,7 +144,6 @@ class CameraThread(threading.Thread):
         super().__init__(name="camera", daemon=True)
         self._prev_gray = None
         self._features = None
-        self._roi_offset = 0
 
     def run(self) -> None:
         backend = hal.get_backend()
@@ -167,12 +166,13 @@ class CameraThread(threading.Thread):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         # --- Pipeline 1: visual odometry ---
-        good_prev = good_next = None
+        est, conf = (0.0, 0.0, 0.0), 0.0
+        good_next = None
         if self._prev_gray is not None and self._features is not None:
-            est, conf, good_prev, good_next = estimate_motion(
+            est, conf, _, good_next = estimate_motion(
                 self._prev_gray, gray, self._features
             )
-            state.set_vo(est, conf)
+            state.add_vo(est, conf)
             # Re-detect when we are running low on tracked points.
             if good_next is None or len(good_next) < config.VO_REDETECT_THRESHOLD:
                 self._features = detect_features(gray)
@@ -186,10 +186,9 @@ class CameraThread(threading.Thread):
         advisory, contours = detect_appearance(frame)
         state.set_advisory(advisory)
 
-        # --- Debug overlay ---
-        self._publish_debug(frame, good_next, contours, advisory)
+        self._publish_debug(frame, good_next, contours, advisory, est, conf)
 
-    def _publish_debug(self, frame, good_next, contours, advisory) -> None:
+    def _publish_debug(self, frame, good_next, contours, advisory, est, conf) -> None:
         dbg = frame.copy()
         if good_next is not None:
             for pt in good_next.reshape(-1, 2):
@@ -200,7 +199,6 @@ class CameraThread(threading.Thread):
         if contours:
             shifted = [c + np.array([[0, roi_top]]) for c in contours]
             cv2.drawContours(dbg, shifted, -1, (0, 0, 255), 2)
-        est, conf = state.get_vo()
         cv2.putText(dbg, "VO dx=%.3f dth=%.3f conf=%.2f" % (est[0], est[2], conf),
                     (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         if advisory:

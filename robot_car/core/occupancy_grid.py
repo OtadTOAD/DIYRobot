@@ -144,10 +144,6 @@ class OccupancyGrid:
             grid[forbidden] = config.GRID_OCCUPIED
         return grid
 
-    # -- frontier helpers ----------------------------------------------------
-    def is_free(self, grid_uint8: np.ndarray, col: int, row: int) -> bool:
-        return grid_uint8[row, col] < config.FRONTIER_FREE_THRESHOLD
-
     # -- persistence ---------------------------------------------------------
     def to_msgpack(self) -> bytes:
         grid = self.to_uint8()

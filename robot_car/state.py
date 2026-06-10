@@ -9,7 +9,7 @@ Locking discipline (see camera_integration_design.md section 5):
     robot_pose       RLock  -- written by localization, read by nav + web
     occupancy_grid   RLock  -- written by SLAM, read by nav + web
     blocked          Lock   -- written by safety, read by navigation
-    vo_estimate      Lock   -- written by camera, read by SLAM
+    vo_estimate      Lock   -- accumulated by camera, consumed by SLAM
     camera_advisory  Lock   -- written by camera, read by safety
     current_mode     Lock   -- written by mode controller, read everywhere
 """
@@ -34,8 +34,8 @@ drop_latched: bool = False                  # cliff detected, needs manual ack
 drop_lock = threading.Lock()
 
 # --- Camera -> localization -------------------------------------------------
-vo_estimate: tuple = (0.0, 0.0, 0.0)        # (dx, dy, dtheta) since last frame
-vo_confidence: float = 0.0
+vo_estimate: tuple = (0.0, 0.0, 0.0)        # (dx, dy, dtheta) accumulated since
+vo_confidence: float = 0.0                  # the last consume_vo()
 vo_lock = threading.Lock()
 
 # --- Camera -> safety -------------------------------------------------------
@@ -109,17 +109,26 @@ def set_drop_latched(value: bool) -> None:
         drop_latched = bool(value)
 
 
-def get_vo() -> tuple:
-    """Return ((dx, dy, dtheta), confidence)."""
-    with vo_lock:
-        return vo_estimate, vo_confidence
-
-
-def set_vo(estimate: tuple, confidence: float) -> None:
+def add_vo(delta: tuple, confidence: float) -> None:
+    """Accumulate one per-frame VO delta (camera runs faster than SLAM)."""
     global vo_estimate, vo_confidence
     with vo_lock:
-        vo_estimate = estimate
+        vo_estimate = (vo_estimate[0] + delta[0],
+                       vo_estimate[1] + delta[1],
+                       vo_estimate[2] + delta[2])
         vo_confidence = float(confidence)
+
+
+def consume_vo() -> tuple:
+    """Return ((dx, dy, dtheta), confidence) accumulated since the last call,
+    then reset -- so a delta is never applied twice and a stalled camera
+    naturally decays to zero motion / zero confidence."""
+    global vo_estimate, vo_confidence
+    with vo_lock:
+        out = (vo_estimate, vo_confidence)
+        vo_estimate = (0.0, 0.0, 0.0)
+        vo_confidence = 0.0
+        return out
 
 
 def get_advisory() -> bool:
