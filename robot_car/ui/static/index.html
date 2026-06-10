@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cargo Robot Control</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    :root { --bg:#11151c; --panel:#1b2230; --ink:#e7ecf3; --muted:#8a97ab; --accent:#3aa0ff; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+    header { display:flex; align-items:center; justify-content:space-between;
+             padding:10px 16px; background:#0d1117; border-bottom:1px solid #222b3a; }
+    header h1 { font-size:16px; margin:0; }
+    #modeBadge { padding:4px 10px; border-radius:12px; background:#23304a; font-size:13px; }
+    .wrap { display:flex; gap:14px; padding:14px; align-items:flex-start; flex-wrap:wrap; }
+    #mapCanvas { background:#0b0e13; border:1px solid #2a3445; cursor:crosshair; image-rendering:pixelated; }
+    .panel { background:var(--panel); border:1px solid #2a3445; border-radius:8px;
+             padding:12px; width:300px; }
+    .panel h2 { font-size:12px; text-transform:uppercase; color:var(--muted);
+                margin:14px 0 6px; letter-spacing:.05em; }
+    .panel h2:first-child { margin-top:0; }
+    button { background:#26344e; color:var(--ink); border:1px solid #3a4a66;
+             border-radius:6px; padding:6px 10px; cursor:pointer; font-size:13px; }
+    button:hover { background:#33415f; }
+    button.active { background:var(--accent); border-color:var(--accent); color:#04101f; }
+    .row { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px; }
+    input, select { background:#0e131c; color:var(--ink); border:1px solid #3a4a66;
+                    border-radius:6px; padding:5px 7px; font-size:13px; }
+    ul { list-style:none; margin:0; padding:0; }
+    li { display:flex; justify-content:space-between; align-items:center;
+         padding:4px 0; border-bottom:1px solid #232c3c; font-size:13px; }
+    #log { height:150px; overflow-y:auto; background:#0a0d12; border:1px solid #232c3c;
+           border-radius:6px; padding:6px; font-family:monospace; font-size:12px; }
+    .log-ok{color:#5fd28a} .log-warn{color:#e2c14e} .log-error{color:#ff6b6b} .log-info{color:#8aa0c0}
+    #camWrap img { width:300px; border:1px solid #2a3445; border-radius:6px; background:#000; }
+    small { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🤖 Cargo Robot Control</h1>
+    <span id="modeBadge">idle</span>
+  </header>
+
+  <div class="wrap">
+    <canvas id="mapCanvas" width="600" height="600"></canvas>
+
+    <div class="panel">
+      <h2>Mode</h2>
+      <div class="row">
+        <button id="btnIdle" class="modeBtn">Idle</button>
+        <button id="btnExplore" class="modeBtn">Explore</button>
+        <button id="btnNavigate" class="modeBtn">Navigate</button>
+      </div>
+      <small>Click the map to set a destination, or pick a waypoint below.</small>
+
+      <h2>Destination</h2>
+      <div class="row">
+        <select id="waypointSelect"><option value="">— waypoint —</option></select>
+        <button id="btnGo">Go</button>
+      </div>
+
+      <h2>Waypoints</h2>
+      <div class="row">
+        <input id="wpName" placeholder="name" size="10" />
+        <button id="btnAddWp">+ Add (here)</button>
+      </div>
+      <ul id="waypointList"></ul>
+
+      <h2>Forbidden Zones</h2>
+      <div class="row">
+        <button id="btnDrawZone">Draw Zone</button>
+        <button id="btnClearZones">Clear All</button>
+      </div>
+
+      <h2>Maps</h2>
+      <div class="row">
+        <select id="mapSelect"></select>
+        <button id="btnLoadMap">Load</button>
+      </div>
+      <div class="row">
+        <input id="mapName" placeholder="map name" size="10" />
+        <button id="btnSaveMap">Save</button>
+        <button id="btnExport">Export PNG</button>
+      </div>
+
+      <h2>Safety</h2>
+      <div class="row"><button id="btnAck">Acknowledge Drop</button></div>
+
+      <h2>Camera Debug</h2>
+      <div id="camWrap"><img id="camImg" alt="camera debug" /></div>
+
+      <h2>Status Log</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script src="/static/map.js"></script>
+  <script src="/static/ui.js"></script>
+</body>
+</html>

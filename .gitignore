@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Robot artifacts
+robot_car/maps/*.map
+robot_car/maps/*.zones
+robot_car/maps/*.png
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,12 @@
+# Core dependencies -- cross-platform, run the full simulator + web stack anywhere.
+# Raspberry Pi GPIO libraries are intentionally NOT here; see requirements-pi.txt.
+numpy>=1.24
+scipy>=1.10
+opencv-python>=4.7
+Flask>=3.0
+Flask-SocketIO>=5.3
+Pillow>=10.0
+msgpack>=1.0
+
+# Testing
+pytest>=7.4

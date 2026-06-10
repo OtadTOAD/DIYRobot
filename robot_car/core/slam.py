@@ -1,0 +1,183 @@
+"""SLAM loop: mapping + scan-match localization + frontier detection (F-10).
+
+A ~10 Hz daemon thread that, each cycle:
+  1. advances the encoder odometry (dead reckoning),
+  2. reads the ultrasonic sensors,
+  3. refines the pose with correlation-window scan matching against the map,
+  4. pulls the latest visual-odometry delta,
+  5. fuses all three into the published robot pose (localization.py),
+  6. feeds the fused pose back into odometry (correction), and
+  7. ray-casts the readings into the occupancy grid.
+
+Mapping runs only in 'explore' mode; in 'navigate'/'idle' the same loop runs as pure
+localization on the fixed map. Frontier detection (:func:`find_frontiers`) is exposed
+for the explore behaviour.
+"""
+
+from __future__ import annotations
+
+import math
+import threading
+import time
+
+import numpy as np
+from scipy.ndimage import binary_dilation
+
+from robot_car import config, state
+from robot_car.core import localization
+from robot_car.core.occupancy_grid import OccupancyGrid
+from robot_car.core.odometry import Odometry
+from robot_car.hardware import sensors
+
+
+# ---------------------------------------------------------------------------
+# Scan matching (pure, testable)
+# ---------------------------------------------------------------------------
+def score_pose(grid: OccupancyGrid, grid_uint8: np.ndarray, pose, distances) -> float:
+    """Fraction of finite sensor endpoints that land on a mapped obstacle cell.
+
+    Higher means the candidate pose better explains the readings against the map.
+    Endpoints are matched against a 1-cell neighbourhood to tolerate discretisation.
+    """
+    x, y, theta = pose
+    finite = 0
+    hits = 0
+    for sensor, angle in config.SENSOR_ANGLES.items():
+        reading_cm = distances.get(sensor, float("inf"))
+        if not math.isfinite(reading_cm):
+            continue
+        finite += 1
+        d = reading_cm / 100.0
+        beam = theta + angle
+        ex = x + d * math.cos(beam)
+        ey = y + d * math.sin(beam)
+        col, row = grid.world_to_grid(ex, ey)
+        if _occupied_near(grid, grid_uint8, col, row):
+            hits += 1
+    if finite == 0:
+        return 0.0
+    return hits / finite
+
+
+def _occupied_near(grid: OccupancyGrid, grid_uint8, col, row, radius=1) -> bool:
+    thr = config.INFLATION_OCCUPIED_THRESHOLD
+    for dc in range(-radius, radius + 1):
+        for dr in range(-radius, radius + 1):
+            c, r = col + dc, row + dr
+            if grid.in_bounds(c, r) and grid_uint8[r, c] > thr:
+                return True
+    return False
+
+
+def scan_match(grid: OccupancyGrid, grid_uint8, pose, distances):
+    """Correlation-window search around ``pose``. Returns ``(best_pose, score)``."""
+    best_pose = pose
+    best_score = score_pose(grid, grid_uint8, pose, distances)
+
+    rng = config.SCAN_MATCH_RANGE
+    step = config.SCAN_MATCH_STEP
+    arng = config.SCAN_MATCH_ANGLE
+    astep = config.SCAN_MATCH_ANGLE_STEP
+
+    dxs = np.arange(-rng, rng + 1e-9, step)
+    dys = np.arange(-rng, rng + 1e-9, step)
+    dthetas = np.arange(-arng, arng + 1e-9, astep)
+    for dx in dxs:
+        for dy in dys:
+            for dth in dthetas:
+                cand = (pose[0] + dx, pose[1] + dy, pose[2] + dth)
+                s = score_pose(grid, grid_uint8, cand, distances)
+                if s > best_score:
+                    best_score = s
+                    best_pose = cand
+    return best_pose, best_score
+
+
+# ---------------------------------------------------------------------------
+# Frontier detection (pure, testable)
+# ---------------------------------------------------------------------------
+def find_frontiers(grid_uint8: np.ndarray):
+    """Return (col, row) of known-free cells adjacent to unknown space."""
+    free = grid_uint8 < config.FRONTIER_FREE_THRESHOLD
+    unknown = grid_uint8 == config.GRID_UNKNOWN
+    unknown_dilated = binary_dilation(unknown)
+    frontier_mask = free & unknown_dilated
+    rows, cols = np.nonzero(frontier_mask)
+    return list(zip(cols.tolist(), rows.tolist()))
+
+
+# ---------------------------------------------------------------------------
+# SLAM system
+# ---------------------------------------------------------------------------
+class SlamSystem(threading.Thread):
+    def __init__(self, grid: OccupancyGrid | None = None, mapping: bool = True):
+        super().__init__(name="slam", daemon=True)
+        self.grid = grid or OccupancyGrid()
+        self.odometry = Odometry(state.get_pose())
+        self.mapping = mapping
+        self._lock = threading.RLock()
+        self.cell_listener = None    # optional callback(list_of_(col,row,value))
+
+    def set_mapping(self, enabled: bool) -> None:
+        with self._lock:
+            self.mapping = enabled
+
+    def run(self) -> None:
+        period = 1.0 / config.SLAM_HZ
+        # Publish the initial grid so the UI has something to draw.
+        state.set_grid(self.grid.to_uint8())
+        while not state.stop_event.is_set():
+            t0 = time.monotonic()
+            self.step()
+            elapsed = time.monotonic() - t0
+            if elapsed < period:
+                time.sleep(period - elapsed)
+
+    def step(self) -> tuple:
+        """One SLAM/localization cycle. Returns the fused pose."""
+        enc_pose = self.odometry.update()
+        distances = sensors.get_all_distances()
+
+        grid_uint8 = self.grid.to_uint8()
+        scan_pose, scan_score = scan_match(self.grid, grid_uint8, enc_pose, distances)
+        scan_accepted = scan_score >= config.SCAN_MATCH_THRESHOLD
+
+        vo_delta, vo_conf = state.get_vo()
+        vo_pose = self._vo_to_pose(enc_pose, vo_delta)
+        slip = localization.detect_slip(self.odometry.last_distance, vo_delta, vo_conf)
+
+        w_e, w_s, w_v = localization.compute_weights(scan_score, scan_accepted, vo_conf, slip)
+        fused = localization.fuse_poses(enc_pose, scan_pose, vo_pose, w_e, w_s, w_v)
+
+        # Feed the correction back so the next dead-reckoning step builds on it.
+        self.odometry.set_pose(fused)
+        state.set_pose(fused)
+
+        if self.mapping:
+            with self._lock:
+                touched = self.grid.integrate_scan(fused, distances)
+                grid_uint8 = self.grid.to_uint8()
+            state.set_grid(grid_uint8)
+            self._emit_cells(touched, grid_uint8)
+        return fused
+
+    def _vo_to_pose(self, base_pose, vo_delta):
+        """Apply the world-frame VO delta to the base pose (theta from delta too)."""
+        return (base_pose[0] + vo_delta[0],
+                base_pose[1] + vo_delta[1],
+                base_pose[2] + vo_delta[2])
+
+    def _emit_cells(self, touched, grid_uint8):
+        if not self.cell_listener or not touched:
+            return
+        seen = set()
+        updates = []
+        for c, r in touched:
+            if (c, r) in seen:
+                continue
+            seen.add((c, r))
+            updates.append((c, r, int(grid_uint8[r, c])))
+        try:
+            self.cell_listener(updates)
+        except Exception:
+            pass

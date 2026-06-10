@@ -1,0 +1,8 @@
+# Raspberry Pi deployment dependencies.
+# Installs everything from requirements.txt plus the GPIO libraries that only
+# exist on the Pi. On the Pi you may prefer 'opencv-python-headless' if running
+# without a desktop -- the MJPEG debug stream works either way.
+-r requirements.txt
+
+RPi.GPIO>=0.7.1
+pigpio>=1.78
