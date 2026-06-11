@@ -9,7 +9,6 @@ Requires the pigpio daemon to be running:  ``sudo pigpiod``
 """
 
 import threading
-import time
 
 import pigpio
 
@@ -29,6 +28,11 @@ class RealBackend:
         self._enc_right = 0
         self._enc_lock = threading.Lock()
         self._cam = None
+        # Per-sensor echo-edge state, populated by persistent pigpio callbacks.
+        self._echo_rise = {}            # sensor -> tick of the last rising edge
+        self._echo_width = {}           # sensor -> last measured pulse width (us)
+        self._echo_done = {}            # sensor -> Event set when a pulse completes
+        self._echo_cbs = []
         self._setup_gpio()
 
     # -- setup ---------------------------------------------------------------
@@ -40,11 +44,18 @@ class RealBackend:
         pi.set_mode(config.PIN_ENA, pigpio.OUTPUT)
         pi.set_mode(config.PIN_ENB, pigpio.OUTPUT)
 
-        # Ultrasonic TRIG out, ECHO in.
-        for trig, echo in config.SENSOR_PINS.values():
+        # Ultrasonic TRIG out, ECHO in. Echo timing is done with persistent
+        # EITHER_EDGE callbacks: the daemon timestamps both edges in hardware and
+        # delivers microsecond ticks, so ``ping_sensor`` just triggers and waits for
+        # the pulse to complete -- no socket polling, no time.time() jitter (P0-1c).
+        for name, (trig, echo) in config.SENSOR_PINS.items():
             pi.set_mode(trig, pigpio.OUTPUT)
             pi.write(trig, 0)
             pi.set_mode(echo, pigpio.INPUT)
+            self._echo_done[name] = threading.Event()
+            self._echo_cbs.append(
+                pi.callback(echo, pigpio.EITHER_EDGE, self._make_echo_cb(name))
+            )
 
         # Encoders: count rising edges via callbacks.
         pi.set_mode(config.PIN_ENCODER_LEFT, pigpio.INPUT)
@@ -80,23 +91,35 @@ class RealBackend:
             self.pi.write(pin, 0)
 
     # -- ultrasonic ----------------------------------------------------------
-    def read_distance_cm(self, sensor: str) -> float:
-        trig, echo = config.SENSOR_PINS[sensor]
-        # 10 us trigger pulse.
-        self.pi.gpio_trigger(trig, 10, 1)
-        timeout = config.SENSOR_TIMEOUT_MS / 1000.0
+    def _make_echo_cb(self, sensor: str):
+        """Build the EITHER_EDGE callback that times one sensor's echo pulse."""
+        def _cb(gpio, level, tick):
+            if level == 1:                       # rising edge: echo started
+                self._echo_rise[sensor] = tick
+            elif level == 0:                     # falling edge: echo finished
+                rise = self._echo_rise.get(sensor)
+                if rise is not None:
+                    self._echo_width[sensor] = pigpio.tickDiff(rise, tick)
+                    self._echo_done[sensor].set()
+        return _cb
 
-        start = time.time()
-        while self.pi.read(echo) == 0:
-            if time.time() - start > timeout:
-                return float("inf")
-        echo_start = time.time()
-        while self.pi.read(echo) == 1:
-            if time.time() - echo_start > timeout:
-                return float("inf")
-        echo_end = time.time()
+    def ping_sensor(self, sensor: str) -> float:
+        """Trigger one HC-SR04 and return the echo distance in cm (``inf`` on timeout).
 
-        dist_cm = (echo_end - echo_start) * config.SPEED_OF_SOUND_CM_S / 2.0
+        The scheduler guarantees only one ping is in flight at a time, so the shared
+        callback state is never raced across sensors.
+        """
+        trig, _ = config.SENSOR_PINS[sensor]
+        done = self._echo_done[sensor]
+        done.clear()
+        self._echo_rise.pop(sensor, None)
+        self.pi.gpio_trigger(trig, 10, 1)        # 10 us trigger pulse
+        if not done.wait(config.SENSOR_TIMEOUT_MS / 1000.0):
+            return float("inf")
+        width_us = self._echo_width.get(sensor)
+        if width_us is None:
+            return float("inf")
+        dist_cm = (width_us / 1_000_000.0) * config.SPEED_OF_SOUND_CM_S / 2.0
         if dist_cm > config.SENSOR_MAX_RANGE_CM or dist_cm <= 0:
             return float("inf")
         return dist_cm
@@ -141,6 +164,8 @@ class RealBackend:
             for cb in (getattr(self, "_cb_left", None), getattr(self, "_cb_right", None)):
                 if cb is not None:
                     cb.cancel()
+            for cb in self._echo_cbs:
+                cb.cancel()
             if self._cam is not None:
                 self._cam.release()
             self.pi.stop()

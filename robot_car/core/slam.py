@@ -21,77 +21,76 @@ import threading
 import time
 
 import numpy as np
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, distance_transform_edt
 
 from robot_car import config, state
 from robot_car.core import localization
-from robot_car.core.geometry import wrap_angle
+from robot_car.core.geometry import sensor_origin, wrap_angle
 from robot_car.core.occupancy_grid import OccupancyGrid
 from robot_car.core.odometry import Odometry
 from robot_car.hardware import sensors
 
 
 # ---------------------------------------------------------------------------
-# Scan matching (pure, testable)
+# Likelihood-field scan matching (pure, testable)
 # ---------------------------------------------------------------------------
-def score_pose(grid: OccupancyGrid, grid_uint8: np.ndarray, pose, distances) -> float:
-    """Fraction of finite sensor endpoints that land on a mapped obstacle cell.
+class LikelihoodField:
+    """Distance-to-nearest-obstacle field; scores a beam endpoint by a Gaussian of
+    that distance. Continuous (no plateaus) and flat where the map is featureless."""
 
-    Higher means the candidate pose better explains the readings against the map.
-    Endpoints are matched against a 1-cell neighbourhood to tolerate discretisation.
-    """
-    x, y, theta = pose
-    finite = 0
-    hits = 0
+    def __init__(self, grid: OccupancyGrid, grid_uint8: np.ndarray):
+        self.grid = grid
+        occupied = grid_uint8 > config.INFLATION_OCCUPIED_THRESHOLD
+        self.flat = not occupied.any()
+        self.dist = (None if self.flat
+                     else distance_transform_edt(~occupied) * grid.resolution)
+
+    def likelihood(self, ex: float, ey: float) -> float:
+        if self.flat:
+            return 0.0
+        col, row = self.grid.world_to_grid(ex, ey)
+        if not self.grid.in_bounds(col, row):
+            return 0.0
+        d = self.dist[row, col]
+        return math.exp(-(d * d) / (2.0 * config.SCAN_MATCH_SIGMA_M ** 2))
+
+
+def score_pose(field: LikelihoodField, pose, distances) -> float:
+    """Mean endpoint likelihood for a pose (0 when no beams hit or the field is flat)."""
+    total = beams = 0
     for sensor, angle in config.SENSOR_ANGLES.items():
         reading_cm = distances.get(sensor, float("inf"))
         if not math.isfinite(reading_cm):
             continue
-        finite += 1
-        d = reading_cm / 100.0
-        beam = theta + angle
-        ex = x + d * math.cos(beam)
-        ey = y + d * math.sin(beam)
-        col, row = grid.world_to_grid(ex, ey)
-        if _occupied_near(grid, grid_uint8, col, row):
-            hits += 1
-    if finite == 0:
-        return 0.0
-    return hits / finite
+        beams += 1
+        ox, oy = sensor_origin(pose, sensor)
+        beam, d = pose[2] + angle, reading_cm / 100.0
+        total += field.likelihood(ox + d * math.cos(beam), oy + d * math.sin(beam))
+    return total / beams if beams else 0.0
 
 
-def _occupied_near(grid: OccupancyGrid, grid_uint8, col, row, radius=1) -> bool:
-    thr = config.INFLATION_OCCUPIED_THRESHOLD
-    for dc in range(-radius, radius + 1):
-        for dr in range(-radius, radius + 1):
-            c, r = col + dc, row + dr
-            if grid.in_bounds(c, r) and grid_uint8[r, c] > thr:
-                return True
-    return False
-
-
-def scan_match(grid: OccupancyGrid, grid_uint8, pose, distances):
-    """Correlation-window search around ``pose``. Returns ``(best_pose, score)``."""
-    best_pose = pose
-    best_score = score_pose(grid, grid_uint8, pose, distances)
-
-    rng = config.SCAN_MATCH_RANGE
-    step = config.SCAN_MATCH_STEP
-    arng = config.SCAN_MATCH_ANGLE
-    astep = config.SCAN_MATCH_ANGLE_STEP
-
-    dxs = np.arange(-rng, rng + 1e-9, step)
-    dys = np.arange(-rng, rng + 1e-9, step)
-    dthetas = np.arange(-arng, arng + 1e-9, astep)
-    for dx in dxs:
-        for dy in dys:
-            for dth in dthetas:
+def scan_match(field: LikelihoodField, pose, distances):
+    """Window search around ``pose``. Returns ``(best_pose, best_score, base_score)``;
+    the caller accepts only a meaningful gain over ``base_score`` (the pose's own)."""
+    base = score_pose(field, pose, distances)
+    best_pose, best_score = pose, base
+    rng, step = config.SCAN_MATCH_RANGE, config.SCAN_MATCH_STEP
+    arng, astep = config.SCAN_MATCH_ANGLE, config.SCAN_MATCH_ANGLE_STEP
+    for dx in np.arange(-rng, rng + 1e-9, step):
+        for dy in np.arange(-rng, rng + 1e-9, step):
+            for dth in np.arange(-arng, arng + 1e-9, astep):
                 cand = (pose[0] + dx, pose[1] + dy, pose[2] + dth)
-                s = score_pose(grid, grid_uint8, cand, distances)
+                s = score_pose(field, cand, distances)
                 if s > best_score:
-                    best_score = s
-                    best_pose = cand
-    return best_pose, best_score
+                    best_pose, best_score = cand, s
+    return best_pose, best_score, base
+
+
+def _damp(a, b, k):
+    """Move pose ``a`` a fraction ``k`` toward ``b`` (angle blended across the wrap)."""
+    return (a[0] + k * (b[0] - a[0]),
+            a[1] + k * (b[1] - a[1]),
+            a[2] + k * wrap_angle(b[2] - a[2]))
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +121,9 @@ class SlamSystem(threading.Thread):
         self._lock = threading.RLock()
         self.cell_listener = None    # optional callback(list_of_(col,row,value))
         self._prev_pose = None       # fused pose last cycle, for the motion guard
+        self._field = None           # cached likelihood field (P0-4)
+        self._field_time = 0.0
+        self._field_dirty = True
 
     def set_mapping(self, enabled: bool) -> None:
         with self._lock:
@@ -133,6 +135,7 @@ class SlamSystem(threading.Thread):
         state.set_grid(self.grid.to_uint8())
         while not state.stop_event.is_set():
             t0 = time.monotonic()
+            state.beat("slam")
             self.step()
             elapsed = time.monotonic() - t0
             if elapsed < period:
@@ -142,25 +145,24 @@ class SlamSystem(threading.Thread):
         """One SLAM/localization cycle. Returns the fused pose."""
         base_pose = self.odometry.get_pose()
         enc_pose = self.odometry.update()
-        distances = sensors.get_all_distances()
+        readings = sensors.get_all_readings()
+        distances = {name: r.distance_cm for name, r in readings.items()}
 
         grid_uint8 = self.grid.to_uint8()
-        scan_pose, scan_score = scan_match(self.grid, grid_uint8, enc_pose, distances)
-        scan_accepted = scan_score >= config.SCAN_MATCH_THRESHOLD
+        field = self._ensure_field(grid_uint8)
+        best_pose, best_score, base_score = scan_match(field, enc_pose, distances)
+        scan_accepted = best_score - base_score >= config.SCAN_MATCH_MIN_GAIN
+        scan_pose = (_damp(enc_pose, best_pose, config.SCAN_MATCH_DAMPING)
+                     if scan_accepted else enc_pose)
 
-        # The VO delta covers the same interval as the encoder update, so it is
-        # applied to the pose from *before* that update -- applying it on top of
-        # enc_pose would count the cycle's motion twice. The delta is robot-frame
-        # (forward, lateral, dtheta) from the forward camera; rotate it into the
-        # world frame at the pre-update heading.
+        # Monocular forward VO has no reliable scale, so it feeds only heading and
+        # slip detection -- never x/y (P1-5). dtheta is applied to the pre-update
+        # heading, the interval the delta actually covers.
         vo_delta, vo_conf = state.consume_vo()
-        cos_h, sin_h = math.cos(base_pose[2]), math.sin(base_pose[2])
-        vo_pose = (base_pose[0] + vo_delta[0] * cos_h - vo_delta[1] * sin_h,
-                   base_pose[1] + vo_delta[0] * sin_h + vo_delta[1] * cos_h,
-                   base_pose[2] + vo_delta[2])
+        vo_pose = (enc_pose[0], enc_pose[1], base_pose[2] + vo_delta[2])
         slip = localization.detect_slip(self.odometry.last_distance, vo_delta, vo_conf)
 
-        w_e, w_s, w_v = localization.compute_weights(scan_score, scan_accepted, vo_conf, slip)
+        w_e, w_s, w_v = localization.compute_weights(best_score, scan_accepted, vo_conf, slip)
         fused = localization.fuse_poses(enc_pose, scan_pose, vo_pose, w_e, w_s, w_v)
 
         # Feed the correction back so the next dead-reckoning step builds on it.
@@ -168,13 +170,28 @@ class SlamSystem(threading.Thread):
         state.set_pose(fused)
 
         if self.mapping and self._scan_motion_ok(self._prev_pose, fused):
+            # Only map sensors whose reading is fresh: a stale ping (the scheduler
+            # sweeps each non-priority sensor at ~1.6 Hz) reflects a pose the robot
+            # has since left, so integrating it would smear the map.
+            fresh = {name: r.distance_cm for name, r in readings.items()
+                     if not r.stale}
             with self._lock:
-                touched = self.grid.integrate_scan(fused, distances)
+                touched = self.grid.integrate_scan(fused, fresh)
                 grid_uint8 = self.grid.to_uint8()
+            self._field_dirty = True
             state.set_grid(grid_uint8)
             self._emit_cells(touched, grid_uint8)
         self._prev_pose = fused
         return fused
+
+    def _ensure_field(self, grid_uint8) -> LikelihoodField:
+        """Rebuild the likelihood field on a map change or at most ~1 Hz (P0-4/P1-6)."""
+        now = time.monotonic()
+        if (self._field is None or self._field_dirty
+                or now - self._field_time > config.SCAN_MATCH_FIELD_REFRESH_S):
+            self._field = LikelihoodField(self.grid, grid_uint8)
+            self._field_time, self._field_dirty = now, False
+        return self._field
 
     @staticmethod
     def _scan_motion_ok(prev_pose, pose) -> bool:

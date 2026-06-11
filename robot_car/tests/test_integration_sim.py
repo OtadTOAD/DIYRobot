@@ -17,7 +17,7 @@ from robot_car import config, state
 from robot_car.context import RobotContext
 from robot_car.core import simulator
 from robot_car.core.safety_monitor import SafetyMonitor
-from robot_car.hardware import hal, motors
+from robot_car.hardware import hal, motors, sensor_scheduler
 from robot_car.modes.explore import Explorer
 from robot_car.modes.navigate import Navigator, REACHED
 
@@ -36,6 +36,7 @@ class Stack:
 
     def __enter__(self):
         hal.get_backend().start()        # sim physics thread
+        sensor_scheduler.start_scheduler()   # keeps the sensor cache fresh
         self.ctx.slam.start()
         self.safety.start()
         time.sleep(0.3)                  # let the first SLAM cycles publish a grid

@@ -39,6 +39,8 @@
     badge.className = mode;
     $("btnIdle").classList.toggle("active", mode === "idle");
     $("btnExplore").classList.toggle("active", mode === "explore");
+    $("btnManual").classList.toggle("active", mode === "manual");
+    setManualActive(mode === "manual");
   }
   function onPose(p) {
     const deg = ((p.theta * 180 / Math.PI) % 360).toFixed(0);
@@ -54,6 +56,95 @@
   // -- mode buttons ----------------------------------------------------------
   $("btnIdle").onclick = () => post("/mode", { mode: "idle" });
   $("btnExplore").onclick = () => post("/mode", { mode: "explore" });
+  $("btnManual").onclick = () => post("/mode", { mode: "manual" });
+
+  // -- manual drive (F-21): a 10 Hz keep-alive re-emits the held stick; releasing,
+  //    hiding the tab, or losing focus emits an explicit zero (dead-man). -------
+  let manualActive = false, manualTimer = null, manualRateMs = 100;
+  let speed = 0.6;
+  const pressed = { fwd: false, back: false, left: false, right: false };
+
+  fetch("/config").then((r) => r.json()).then((c) => {
+    if (c.manual_cmd_rate_hz) manualRateMs = 1000 / c.manual_cmd_rate_hz;
+  }).catch(() => {});
+
+  function manualVector() {
+    const lin = (pressed.fwd ? 1 : 0) - (pressed.back ? 1 : 0);
+    const ang = (pressed.left ? 1 : 0) - (pressed.right ? 1 : 0);
+    return { linear: lin * speed, angular: ang * speed };
+  }
+  function emitManual() {
+    if (manualActive) map.socket.emit("manual_cmd", manualVector());
+  }
+  function reflectHeld() {
+    document.querySelectorAll("#dpad button").forEach((b) => {
+      const d = btnDir(b);
+      b.classList.toggle("held", d !== "stop" && pressed[d]);
+    });
+  }
+  function setManualActive(on) {
+    manualActive = on;
+    $("manualSection").hidden = !on;
+    if (on) {
+      if (!manualTimer) manualTimer = setInterval(emitManual, manualRateMs);
+    } else {
+      clearInterval(manualTimer); manualTimer = null;
+      for (const k in pressed) pressed[k] = false;
+      reflectHeld();
+      map.socket.emit("manual_cmd", { linear: 0, angular: 0 });
+    }
+  }
+  function btnDir(b) {
+    const lin = +b.dataset.lin, ang = +b.dataset.ang;
+    if (lin === 0 && ang === 0) return "stop";
+    if (lin > 0) return "fwd";
+    if (lin < 0) return "back";
+    return ang > 0 ? "left" : "right";
+  }
+  function setHeld(dir, on) {
+    if (dir === "stop") { for (const k in pressed) pressed[k] = false; }
+    else pressed[dir] = on;
+    reflectHeld();
+    emitManual();
+  }
+
+  $("manualSpeed").oninput = (e) => {
+    speed = +e.target.value;
+    $("manualSpeedVal").textContent = Math.round(speed * 100) + "%";
+  };
+
+  document.querySelectorAll("#dpad button").forEach((b) => {
+    const dir = btnDir(b);
+    b.addEventListener("pointerdown", (e) => { e.preventDefault(); setHeld(dir, true); });
+    const release = (e) => { e.preventDefault(); if (dir !== "stop") setHeld(dir, false); };
+    b.addEventListener("pointerup", release);
+    b.addEventListener("pointerleave", release);
+    b.addEventListener("pointercancel", release);
+  });
+
+  const KEYDIR = {
+    w: "fwd", arrowup: "fwd", s: "back", arrowdown: "back",
+    a: "left", arrowleft: "left", d: "right", arrowright: "right",
+  };
+  document.addEventListener("keydown", (ev) => {
+    if (!manualActive || ev.repeat) return;
+    const dir = KEYDIR[ev.key.toLowerCase()];
+    if (dir) { ev.preventDefault(); setHeld(dir, true); }
+  });
+  document.addEventListener("keyup", (ev) => {
+    if (!manualActive) return;
+    const dir = KEYDIR[ev.key.toLowerCase()];
+    if (dir) { ev.preventDefault(); setHeld(dir, false); }
+  });
+  // Losing focus / hiding the page must coast the robot to a stop (it stays in
+  // manual mode -- the keep-alive then just re-emits the zero command).
+  function stopManual() {
+    for (const k in pressed) pressed[k] = false;
+    reflectHeld();
+    if (manualActive) map.socket.emit("manual_cmd", { linear: 0, angular: 0 });
+  }
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopManual(); });
+  window.addEventListener("blur", stopManual);
 
   // -- map clicks: navigate, or forbidden-zone corners when drawing ----------
   // A single click handler dispatches both, so finishing a zone can never also

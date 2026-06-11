@@ -80,6 +80,31 @@ def test_mode_idle_ok(server):
     assert controller.mode == "idle"
 
 
+def test_config_endpoint_serves_manual_rate(server):
+    _, _, app, _ = server
+    res = app.test_client().get("/config")
+    assert res.status_code == 200
+    assert res.get_json()["manual_cmd_rate_hz"] == config.MANUAL_CMD_RATE_HZ
+
+
+def test_mode_manual_ok(server):
+    _, controller, app, _ = server
+    res = app.test_client().post("/mode", json={"mode": "manual"})
+    assert res.status_code == 200
+    assert controller.mode == "manual"
+    controller.stop()
+
+
+def test_manual_cmd_ws_sets_state(server):
+    _, _, app, socketio = server
+    client = socketio.test_client(app)
+    client.emit("manual_cmd", {"linear": 0.5, "angular": -0.25})
+    socketio.sleep(0.05)
+    linear, angular, _ = state.get_manual_cmd()
+    assert linear == 0.5 and angular == -0.25
+    client.disconnect()
+
+
 def test_websocket_connect_emits_map_base(server):
     _, _, app, socketio = server
     state.set_grid(simulator.get_world() and None)  # ensure grid published from slam grid

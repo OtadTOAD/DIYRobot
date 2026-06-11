@@ -53,6 +53,14 @@ def create_server(context, controller):
     def index():
         return send_from_directory(_STATIC, "index.html")
 
+    @app.route("/config")
+    def client_config():
+        # Values the browser needs at runtime (teleop keep-alive cadence, F-21).
+        return jsonify({
+            "manual_cmd_rate_hz": config.MANUAL_CMD_RATE_HZ,
+            "manual_cmd_timeout_s": config.MANUAL_CMD_TIMEOUT_S,
+        })
+
     @app.route("/map.png")
     def map_png():
         with context.slam._lock:
@@ -93,6 +101,8 @@ def create_server(context, controller):
         try:
             if mode == "idle":
                 controller.start_idle()
+            elif mode == "manual":
+                controller.start_manual()
             elif mode == "explore":
                 controller.start_explore(request.json.get("name", "explored"))
             elif mode == "navigate":
@@ -180,6 +190,12 @@ def create_server(context, controller):
             controller.navigate_to((int(data["x"]), int(data["y"])))
         except InvalidTransition as exc:
             state.set_log("error", "Cannot navigate: %s" % exc)
+
+    @socketio.on("manual_cmd")
+    def on_manual_cmd(data):
+        # Store only; the manual behaviour (sole motor driver) applies it with the
+        # dead-man freshness check. Never touch motors from a socket handler (F-21).
+        state.set_manual_cmd(data.get("linear", 0.0), data.get("angular", 0.0))
 
     @socketio.on("draw_zone")
     def on_draw_zone(data):

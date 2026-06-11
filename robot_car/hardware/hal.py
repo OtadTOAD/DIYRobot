@@ -13,7 +13,9 @@ Backend interface:
     start() -> None                       initialise hardware / start the sim physics
     motor_set(left: float, right: float)  wheel speeds, -1..1 (fraction of full PWM)
     motor_stop() -> None
-    read_distance_cm(sensor: str) -> float  'front'|'right'|'back'|'left'|'down'
+    ping_sensor(sensor: str) -> float       one blocking ping, cm ('front'|'right'|
+                                            'back'|'left'|'down'); driven only by the
+                                            sensor_scheduler, never by consumers
     read_encoder_pulses() -> (int, int)     (left, right) pulses since last call
     camera_read() -> np.ndarray | None      latest BGR frame
     cleanup() -> None                        stop motors, release GPIO / sim
@@ -47,6 +49,10 @@ def get_backend():
 def reset_backend():
     """Drop the cached backend (used by tests)."""
     global _backend
+    # A new backend/world invalidates any cached sensor readings. Lazy import avoids
+    # an import cycle (sensor_scheduler imports hal).
+    from robot_car.hardware import sensor_scheduler
+    sensor_scheduler.reset_scheduler()
     with _lock:
         if _backend is not None:
             try:

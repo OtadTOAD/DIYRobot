@@ -20,8 +20,9 @@ import signal
 from robot_car import config, state
 from robot_car.context import RobotContext
 from robot_car.controller import ModeController
-from robot_car.hardware import camera, gpio_cleanup, hal, platform_detect
+from robot_car.hardware import camera, gpio_cleanup, hal, platform_detect, sensor_scheduler
 from robot_car.core.safety_monitor import start_safety
+from robot_car.core.watchdog import start_watchdog
 from robot_car.ui.server import create_server
 
 
@@ -41,11 +42,13 @@ def run(explore: bool = False, map_name: str | None = None,
 
     backend = hal.get_backend()
     backend.start()
+    sensor_scheduler.start_scheduler()   # single owner of the ultrasonic bus
 
     context, controller, app, socketio = build()
 
     camera.start_camera()
     start_safety()
+    start_watchdog()
     context.slam.start()
     app._start_background()             # pose broadcaster
 

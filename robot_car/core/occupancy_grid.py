@@ -26,6 +26,7 @@ from PIL import Image
 from scipy.ndimage import binary_dilation
 
 from robot_car import config
+from robot_car.core.geometry import sensor_origin
 
 
 def bresenham(x0: int, y0: int, x1: int, y1: int):
@@ -97,23 +98,30 @@ class OccupancyGrid:
         """Ray-cast each horizontal sensor reading into the grid.
 
         Returns the list of (col, row) cells whose value changed (for delta web
-        updates). ``distances`` are in cm; the downward sensor is ignored here.
+        updates). ``distances`` are in cm; the downward sensor is ignored here. A
+        sensor *absent* from ``distances`` is skipped (e.g. a stale reading the SLAM
+        loop withheld) -- only a present ``inf`` reading carves free space.
         """
         x, y, theta = pose
-        rcol, rrow = self.world_to_grid(x, y)
-        max_range_m = config.SENSOR_MAX_RANGE_CM / 100.0
+        inf_free_m = min(config.SENSOR_MAX_RANGE_CM / 100.0,
+                         config.SENSOR_INF_FREE_RANGE_M)
         touched = []
 
         for sensor, angle in config.SENSOR_ANGLES.items():
-            reading_cm = distances.get(sensor, float("inf"))
+            if sensor not in distances:
+                continue
+            reading_cm = distances[sensor]
             hit = math.isfinite(reading_cm)
-            d = (reading_cm / 100.0) if hit else max_range_m
+            ox, oy = sensor_origin(pose, sensor)   # cast from the mount, not centre
+            ocol, orow = self.world_to_grid(ox, oy)
             beam = theta + angle
-            ex = x + d * math.cos(beam)
-            ey = y + d * math.sin(beam)
+            # No echo: carve free only a short way (unknown beyond), never mark an
+            # endpoint occupied. A real echo: free along the beam, occupied endpoint.
+            d = (reading_cm / 100.0) if hit else inf_free_m
+            ex, ey = ox + d * math.cos(beam), oy + d * math.sin(beam)
             ecol, erow = self.world_to_grid(ex, ey)
 
-            cells = bresenham(rcol, rrow, ecol, erow)
+            cells = bresenham(ocol, orow, ecol, erow)
             for i, (c, r) in enumerate(cells):
                 if not self.in_bounds(c, r):
                     break
@@ -121,6 +129,16 @@ class OccupancyGrid:
                 p = config.P_OCCUPIED if (is_endpoint and hit) else config.P_FREE
                 self.update_cell(c, r, p)
                 touched.append((c, r))
+
+            # Beam cone (P1-4): a hit could lie anywhere across ~15 deg, so mark the
+            # endpoint occupied at the fan edges too (cheap: two extra cells).
+            if hit:
+                for fan in (-config.SENSOR_BEAM_HALF_FAN, config.SENSOR_BEAM_HALF_FAN):
+                    fx, fy = ox + d * math.cos(beam + fan), oy + d * math.sin(beam + fan)
+                    fc, fr = self.world_to_grid(fx, fy)
+                    if self.in_bounds(fc, fr):
+                        self.update_cell(fc, fr, config.P_OCCUPIED)
+                        touched.append((fc, fr))
         return touched
 
     # -- published representations ------------------------------------------

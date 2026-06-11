@@ -15,6 +15,7 @@ from robot_car import state
 from robot_car.hardware import motors
 from robot_car.modes.explore import Explorer
 from robot_car.modes.idle import Idle
+from robot_car.modes.manual import Manual
 from robot_car.modes.navigate import Navigator, REACHED, NO_PATH
 
 
@@ -23,10 +24,13 @@ class InvalidTransition(Exception):
 
 
 class ModeController:
+    # Manual (teleop) is reachable from every mode and exits to any -- the point of an
+    # override is to grab control whenever the robot gets stuck (F-21).
     VALID = {
-        "idle": {"explore", "navigate"},
-        "explore": {"idle", "navigate"},
-        "navigate": {"idle", "explore", "navigate"},
+        "idle": {"explore", "navigate", "manual"},
+        "explore": {"idle", "navigate", "manual"},
+        "navigate": {"idle", "explore", "navigate", "manual"},
+        "manual": {"idle", "explore", "navigate"},
     }
 
     def __init__(self, context):
@@ -47,6 +51,11 @@ class ModeController:
         explorer = Explorer(self.ctx, save_name=save_name)
         explorer.navigator.path_listener = self.on_path
         self._switch("explore", explorer.run)
+
+    def start_manual(self) -> None:
+        self._require_transition("manual")
+        self.ctx.slam.set_mapping(False)        # mapping is off in manual (P1-2 rule)
+        self._switch("manual", lambda stop: Manual(self.ctx).run(stop))
 
     def navigate_to(self, goal_cell) -> None:
         self._require_transition("navigate")

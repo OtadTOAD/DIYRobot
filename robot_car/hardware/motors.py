@@ -13,6 +13,7 @@ wheels forward" injects several degrees of heading error).
 
 import threading
 
+from robot_car import config, state
 from robot_car.hardware import hal
 
 _last_command = (0.0, 0.0)
@@ -41,10 +42,24 @@ def _command(left: float, right: float) -> None:
         _last_command = (left, right)
 
 
+def _safety_alive() -> bool:
+    """False only when the safety thread has run and then gone stale (dead-man).
+
+    A missing heartbeat means safety was never started (e.g. a unit test driving
+    motors directly), so driving is allowed; a *stale* heartbeat means the thread
+    that overrides everything has died, so motion must be refused (P0-3).
+    """
+    age = state.heartbeat_age("safety")
+    return age is None or age <= config.SAFETY_DEADMAN_TIMEOUT_S
+
+
 def set_speed(left: float, right: float) -> None:
     """Set motor speeds. Range -1.0..1.0 (negative = reverse, 0 = stop)."""
     left = max(-1.0, min(1.0, float(left)))
     right = max(-1.0, min(1.0, float(right)))
+    if not _safety_alive():
+        stop()                       # refuse to drive on a dead safety thread
+        return
     _command(left, right)
     hal.get_backend().motor_set(left, right)
 

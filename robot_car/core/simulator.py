@@ -27,6 +27,7 @@ import time
 import numpy as np
 
 from robot_car import config
+from robot_car.core.geometry import sensor_origin
 
 
 # ---------------------------------------------------------------------------
@@ -246,13 +247,15 @@ class World:
     # -- sensor interface ----------------------------------------------------
     def read_distance_cm(self, sensor: str) -> float:
         with self._lock:
+            # Rays originate at the sensor mount, not the robot centre (P0-5).
+            ox, oy = sensor_origin((self.x, self.y, self.theta), sensor)
             if sensor == "down":
-                return self._read_down_cm()
+                return self._read_down_cm(ox, oy)
             angle = self.theta + config.SENSOR_ANGLES[sensor]
             dx, dy = math.cos(angle), math.sin(angle)
             best = None
             for (ax, ay), (bx, by) in self.walls:
-                t = _ray_segment_distance(self.x, self.y, dx, dy, ax, ay, bx, by)
+                t = _ray_segment_distance(ox, oy, dx, dy, ax, ay, bx, by)
                 if t is not None and (best is None or t < best):
                     best = t
             if best is None:
@@ -262,9 +265,9 @@ class World:
                 return float("inf")
             return max(1.0, dist_cm)
 
-    def _read_down_cm(self) -> float:
+    def _read_down_cm(self, ox: float, oy: float) -> float:
         for (xmin, ymin, xmax, ymax) in self.cliffs:
-            if xmin <= self.x <= xmax and ymin <= self.y <= ymax:
+            if xmin <= ox <= xmax and ymin <= oy <= ymax:
                 return config.DROP_FLOOR_GONE_CM + 10.0   # floor gone
         return config.DROP_NORMAL_CM + self._rng.normal(0, 0.3)
 

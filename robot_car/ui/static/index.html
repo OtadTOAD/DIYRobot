@@ -31,6 +31,17 @@
     #modeBadge.idle     { background:#2a3550; color:var(--muted); }
     #modeBadge.explore  { background:#3d3517; color:var(--warn); }
     #modeBadge.navigate { background:#143a5e; color:var(--accent); }
+    #modeBadge.manual   { background:#143a2e; color:var(--ok); }
+
+    /* Manual drive D-pad */
+    #manualSection[hidden] { display:none; }
+    #dpad { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px;
+            max-width:210px; margin:4px auto 0; touch-action:none; }
+    #dpad button { padding:14px 0; font-size:18px; user-select:none; }
+    #dpad button.held { background:var(--ok); border-color:var(--ok); color:#04101f; }
+    #dpad .spacer { visibility:hidden; }
+    .slider-row { display:flex; align-items:center; gap:8px; margin-top:10px; }
+    .slider-row input[type=range] { flex:1; }
 
     .wrap {
       display:grid; grid-template-columns:minmax(0,1fr) 340px;
@@ -117,11 +128,33 @@
         <div class="row">
           <button id="btnIdle" class="modeBtn">Idle / Stop</button>
           <button id="btnExplore" class="modeBtn">Explore</button>
+          <button id="btnManual" class="modeBtn">Manual</button>
         </div>
         <div class="row" style="margin-top:8px">
           <select id="waypointSelect"><option value="">— navigate to waypoint —</option></select>
           <button id="btnGo" disabled>Go</button>
         </div>
+      </section>
+
+      <section id="manualSection" hidden>
+        <h2>Manual Drive</h2>
+        <div id="dpad">
+          <span class="spacer"></span>
+          <button data-lin="1"  data-ang="0" title="Forward (W / ↑)">▲</button>
+          <span class="spacer"></span>
+          <button data-lin="0"  data-ang="1" title="Turn left (A / ←)">◀</button>
+          <button data-lin="0"  data-ang="0" title="Stop (S / ↓)">■</button>
+          <button data-lin="0"  data-ang="-1" title="Turn right (D / →)">▶</button>
+          <span class="spacer"></span>
+          <button data-lin="-1" data-ang="0" title="Reverse">▼</button>
+          <span class="spacer"></span>
+        </div>
+        <div class="slider-row">
+          <small>Speed</small>
+          <input id="manualSpeed" type="range" min="0.2" max="1" step="0.05" value="0.6" />
+          <small id="manualSpeedVal">60%</small>
+        </div>
+        <small>Hold a button or use WASD / arrow keys. Releasing stops.</small>
       </section>
 
       <section>

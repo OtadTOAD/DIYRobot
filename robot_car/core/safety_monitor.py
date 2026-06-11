@@ -1,24 +1,16 @@
 """Reactive safety layer (F-05) -- the highest-priority behaviour.
 
-Runs as an independent ~20 Hz daemon thread. Its decisions override navigation with
-no exceptions (camera_integration_design.md priority hierarchy): it stops the motors
-and raises ``state.blocked`` directly, so a bug in the planner can never disable
-collision avoidance.
+An independent ~10 Hz daemon whose decisions override navigation: it stops the motors
+and raises ``state.blocked`` directly, so a planner bug can never disable collision
+avoidance. The decision logic is the pure, unit-tested :func:`evaluate`.
 
-Responsibilities:
-  * Frontal stop + recovery   -- front reading below the stop threshold (tightened
-    when the camera advisory flag is set): stop, reverse briefly, pivot away so
-    navigation can retry from a clear-ish pose.
-  * Side / back scrape stop    -- left/right/back below the (much tighter)
-    collision-imminent threshold: stop and pivot away from the closest side.
-    Every block must end in a recovery that unblocks -- a stationary hold next to
-    a wall would deadlock navigation forever, since the wall never moves.
-  * Drop / cliff detection     -- downward sensor reading above the "floor gone"
-    threshold latches an emergency stop that requires manual acknowledgement from
-    the web UI; below the "obstacle below" threshold triggers stop-and-reverse.
-
-The decision logic is isolated in :func:`evaluate` (pure, unit tested); the thread
-only translates a decision into motor actions and flag writes.
+The loop never blocks. Each cycle it reads the sensor cache, decides, and steps a
+recovery state machine by one cycle (P0-2) -- the old blocking reverse/pivot sleeps
+stopped the one thread whose job is reacting, reversing blind into what was behind it.
+Now monitoring continues through every maneuver, the reverse phase is back-sensor
+gated, and a cliff mid-maneuver pre-empts immediately. In manual mode the monitor
+still decides and latches but does not own the motors -- teleop drives and gates
+direction itself (F-21), so automatic recovery is suppressed.
 """
 
 import threading
@@ -67,62 +59,104 @@ class SafetyMonitor(threading.Thread):
     def __init__(self, hz: float = config.SAFETY_HZ):
         super().__init__(name="safety", daemon=True)
         self.period = 1.0 / hz
+        # Pending recovery phases: a list of (kind, direction, cycles_left) tuples,
+        # consumed one cycle per loop. Empty means "not recovering".
+        self._recovery: list = []
 
     def run(self) -> None:
         while not state.stop_event.is_set():
+            state.beat("safety")
             distances = sensors.get_all_distances()
             decision = evaluate(distances, state.get_advisory(), state.is_drop_latched())
-            self._act(decision, distances)
-            time.sleep(self.period)
+            self.step(decision, distances)
+            state.stop_event.wait(self.period)
 
-    # -- actions -------------------------------------------------------------
-    def _act(self, decision: str, distances: dict | None = None) -> None:
+    @staticmethod
+    def _owns_motors() -> bool:
+        """The monitor drives the motors except in manual mode (F-21), where the
+        teleop behaviour is the sole driver and gates direction itself."""
+        return state.get_mode() != "manual"
+
+    # -- per-cycle decision + stepped recovery -------------------------------
+    def step(self, decision: str, distances: dict | None = None) -> None:
+        """Handle one cycle: a cliff/latch always wins; otherwise advance any active
+        recovery, else act on the decision. Never blocks."""
+        distances = distances or {}
+        owns = self._owns_motors()
+
+        # A cliff or an existing latch pre-empts everything, including a maneuver.
+        if decision == LATCHED:
+            self._recovery = []
+            if owns:
+                motors.stop()
+            return
+        if decision == DROP_CLIFF:
+            self._recovery = []
+            if owns:
+                motors.stop()
+            state.set_drop_latched(True)            # needs manual ack to clear
+            state.set_blocked(True)
+            state.set_log("error",
+                          "Cliff detected -- emergency stop. Acknowledge to resume.")
+            return
+
+        # Mid-recovery: keep stepping it (monitoring continues every cycle).
+        if self._recovery and owns:
+            if self._step_recovery(distances):
+                state.set_blocked(True)
+            else:
+                state.set_blocked(False)            # maneuver finished -- let nav retry
+            return
+
         if decision == CLEAR:
             state.set_blocked(False)
             return
 
-        # Everything else means "do not let navigation drive right now".
-        motors.stop()
+        # A new hazard: stop and block. In manual mode we stop here and let the
+        # operator drive out (no automatic recovery to fight them).
+        if owns:
+            motors.stop()
         state.set_blocked(True)
-
-        if decision == DROP_CLIFF:
-            state.set_drop_latched(True)            # needs manual ack to clear
-            state.set_log("error", "Cliff detected -- emergency stop. Acknowledge to resume.")
-        elif decision == DROP_OBSTACLE:
-            self._reverse()
-            state.set_blocked(False)
+        if not owns:
+            return
+        if decision == DROP_OBSTACLE:
+            self._recovery = [("reverse", 0, config.SAFETY_REVERSE_CYCLES)]
         elif decision == BLOCK_FRONT:
-            self._reverse()
-            self._pivot()
-            state.set_blocked(False)                # allow navigation to retry
+            self._recovery = [("reverse", 0, config.SAFETY_REVERSE_CYCLES),
+                              ("pivot", 1, config.SAFETY_PIVOT_CYCLES)]
         elif decision == BLOCK_SIDE:
-            self._recover_side(distances or {})
-            state.set_blocked(False)
-        elif decision == LATCHED:
-            pass                                    # frozen until acknowledged
+            self._recovery = self._side_recovery(distances)
 
-    def _recover_side(self, distances: dict) -> None:
-        """Pivot away from the closest side; a back reading clears by itself when
-        navigation resumes driving forward."""
+    def _side_recovery(self, distances: dict) -> list:
+        """Pivot away from the closest side; nothing to do if only the back is close
+        (driving forward clears it on its own)."""
         left = distances.get("left", float("inf"))
         right = distances.get("right", float("inf"))
         if min(left, right) < distances.get("back", float("inf")):
-            self._pivot(direction=1 if left < right else -1)
+            return [("pivot", 1 if left < right else -1, config.SAFETY_PIVOT_CYCLES)]
+        return []
 
-    def _sleep_or_abort(self, seconds: float) -> None:
-        """Sleep, but bail out immediately on shutdown."""
-        state.stop_event.wait(seconds)
-
-    def _reverse(self) -> None:
-        motors.set_speed(-config.REVERSE_SPEED, -config.REVERSE_SPEED)
-        self._sleep_or_abort(config.SAFETY_REVERSE_TIME_S)
+    def _step_recovery(self, distances: dict) -> bool:
+        """Drive one cycle of the recovery plan. Return True while still recovering."""
+        while self._recovery:
+            kind, direction, left = self._recovery[0]
+            if left <= 0:
+                self._recovery.pop(0)
+                continue
+            if kind == "reverse" and \
+                    distances.get("back", float("inf")) < config.SAFETY_BACK_GATE_CM:
+                # Something behind -- do not reverse into it; skip to the next phase.
+                self._recovery.pop(0)
+                continue
+            if kind == "reverse":
+                motors.set_speed(-config.REVERSE_SPEED, -config.REVERSE_SPEED)
+            else:   # pivot: +1 turns right (CW), -1 turns left (CCW)
+                motors.set_speed(direction * config.TURN_SPEED,
+                                 -direction * config.TURN_SPEED)
+            self._recovery[0] = (kind, direction, left - 1)
+            return True
         motors.stop()
-
-    def _pivot(self, direction: int = 1) -> None:
-        """Pivot in place; +1 turns right (clockwise), -1 turns left."""
-        motors.set_speed(direction * config.TURN_SPEED, -direction * config.TURN_SPEED)
-        self._sleep_or_abort(config.SAFETY_PIVOT_TIME_S)
-        motors.stop()
+        return False
 
 
 def acknowledge_drop() -> None:

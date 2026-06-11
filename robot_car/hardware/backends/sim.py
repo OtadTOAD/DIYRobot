@@ -24,7 +24,13 @@ class SimBackend:
     def motor_stop(self) -> None:
         simulator.get_world().set_motor(0.0, 0.0)
 
-    def read_distance_cm(self, sensor: str) -> float:
+    def ping_sensor(self, sensor: str) -> float:
+        """One sensor 'ping': sample the world's raycast at the current pose (cm).
+
+        The scheduler calls this at the same spaced cadence the real bus runs at, so
+        the simulator exercises the real sensing rate rather than an unobtainable
+        instantaneous five-sensor sweep.
+        """
         return simulator.get_world().read_distance_cm(sensor)
 
     def read_encoder_pulses(self):

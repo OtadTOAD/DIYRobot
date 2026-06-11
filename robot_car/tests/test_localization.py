@@ -2,8 +2,21 @@
 
 import math
 
-from robot_car import config
+import pytest
+
+from robot_car import config, state
 from robot_car.core import localization as loc
+
+
+def test_vo_confidence_is_min_over_window():
+    # One lucky frame must not launder a delta accumulated over garbage ones (P1-5).
+    state.add_vo((0.1, 0.0, 0.01), 0.9)
+    state.add_vo((0.1, 0.0, 0.01), 0.2)
+    state.add_vo((0.1, 0.0, 0.01), 0.8)
+    delta, conf = state.consume_vo()
+    assert conf == 0.2
+    assert delta[0] == pytest.approx(0.3)
+    assert state.consume_vo()[1] == 0.0              # reset after consume
 
 
 def test_fuse_falls_back_to_encoder_when_others_zero():

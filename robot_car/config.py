@@ -68,6 +68,10 @@ SENSOR_TIMEOUT_MS = 30          # echo timeout -> reading is float('inf')
 SENSOR_MAX_RANGE_CM = 400.0     # HC-SR04 practical max range
 SPEED_OF_SOUND_CM_S = 34300.0   # cm/s for echo time -> distance
 
+# --- Sensor scheduler (single bus owner; non-blocking cache) -- see P0-1 -----
+SENSOR_PING_SPACING_S = 0.06    # cross-talk gap between pings (~16 pings/s max)
+SENSOR_STALE_AGE_S = 0.5        # readings older than this are flagged stale
+
 # Mount angle of each horizontal sensor relative to robot heading (radians).
 # Robot +x is forward. Positive angle is counter-clockwise (left).
 SENSOR_ANGLES = {
@@ -78,10 +82,30 @@ SENSOR_ANGLES = {
 }
 SENSOR_MOUNT_HEIGHT_CM = 12.0   # horizontal sensors mounted ~12 cm up
 
+# Mount position of each sensor in the robot frame, metres (dx forward, dy left).
+# Sensors sit on the chassis perimeter, so readings are cast from here, not the pose;
+# otherwise every wall maps ~10 cm too far out and scan matching corrects against that
+# distorted map (P0-5). Applied identically in mapping, scan matching and the sim.
+_SENSOR_MOUNT_R = 0.10
+SENSOR_OFFSETS = {
+    "front": (_SENSOR_MOUNT_R, 0.0),
+    "back":  (-_SENSOR_MOUNT_R, 0.0),
+    "left":  (0.0, _SENSOR_MOUNT_R),
+    "right": (0.0, -_SENSOR_MOUNT_R),
+    "down":  (_SENSOR_MOUNT_R, 0.0),   # cliff sensor is front-mounted (see P0-2)
+}
+
+# Beam model (P1-4). A no-echo usually means an absorbing/oblique surface, not 4 m of
+# free space, so a no-echo carves free only this far (confident long free lines punch
+# holes in walls A* then routes through).
+SENSOR_INF_FREE_RANGE_M = 1.0
+# HC-SR04 cone is ~15 deg wide, so a hit's endpoint is marked occupied across this fan.
+SENSOR_BEAM_HALF_FAN = math.radians(7.5)
+
 # ---------------------------------------------------------------------------
 # Safety thresholds
 # ---------------------------------------------------------------------------
-SAFETY_HZ = 10.0                # monitor loop rate (5 blocking sensor reads/cycle)
+SAFETY_HZ = 10.0                # monitor decision-loop rate (reads the sensor cache)
 STOP_THRESHOLD_CM = 18.0        # obstacle ahead (direction of travel) -> stop
 ADVISORY_TIGHTEN_CM = 8.0       # extra front margin when camera advisory is set
 # Left/right/back only block when a collision is imminent. Distances are measured
@@ -94,6 +118,28 @@ DROP_OBSTACLE_CM = 7.0          # < this -> obstacle directly below/front
 
 SAFETY_REVERSE_TIME_S = 0.6     # how long to back away on frontal block
 SAFETY_PIVOT_TIME_S = 0.5       # how long to pivot away on frontal block
+# Recovery is stepped one safety cycle at a time, never a blocking sleep (P0-2), so
+# durations are whole cycles at SAFETY_HZ.
+SAFETY_REVERSE_CYCLES = max(1, round(SAFETY_REVERSE_TIME_S * SAFETY_HZ))
+SAFETY_PIVOT_CYCLES = max(1, round(SAFETY_PIVOT_TIME_S * SAFETY_HZ))
+SAFETY_BACK_GATE_CM = SIDE_STOP_THRESHOLD_CM  # rear reading that aborts a reverse
+
+# --- Dead-man / thread supervision (P0-3) ---------------------------------
+# Core loops stamp a heartbeat; a stale safety heartbeat makes the motor layer refuse
+# to drive, and the watchdog surfaces any stalled thread to the status log.
+SAFETY_DEADMAN_TIMEOUT_S = 0.5  # motors coast to stop if safety heartbeat older
+WATCHDOG_HZ = 5.0
+WATCHDOG_STALE_S = 1.0          # report a thread stalled past this heartbeat age
+
+# ---------------------------------------------------------------------------
+# Manual control override / teleop (F-21)
+# ---------------------------------------------------------------------------
+# Dead-man: the client re-emits the held stick at MANUAL_CMD_RATE_HZ, and the manual
+# behaviour applies it only while fresher than the timeout, else stops.
+MANUAL_CMD_TIMEOUT_S = 0.4
+MANUAL_CMD_RATE_HZ = 10.0       # client repeat rate; also served to the JS
+MANUAL_LINEAR_SPEED = DRIVE_SPEED   # wheel speed at full forward/back stick
+MANUAL_TURN_SPEED = TURN_SPEED      # wheel speed at full rotate stick
 
 # ---------------------------------------------------------------------------
 # Occupancy grid / mapping
@@ -154,7 +200,13 @@ SCAN_MATCH_RANGE = 0.15         # +/- search window (m)
 SCAN_MATCH_ANGLE = math.radians(10)
 SCAN_MATCH_STEP = 0.05          # m step inside the window
 SCAN_MATCH_ANGLE_STEP = math.radians(5)
-SCAN_MATCH_THRESHOLD = 0.35     # min normalised score to accept a correction
+# Likelihood-field scan matching (P0-4): each endpoint scores a Gaussian of its
+# distance to the nearest mapped obstacle -- continuous, penalises near misses, and
+# flat (no correction) where the map is featureless.
+SCAN_MATCH_SIGMA_M = 0.10       # Gaussian width of the likelihood field (m)
+SCAN_MATCH_MIN_GAIN = 0.05      # min mean-likelihood improvement to accept a correction
+SCAN_MATCH_DAMPING = 0.5        # fraction of an accepted correction actually applied
+SCAN_MATCH_FIELD_REFRESH_S = 1.0  # recompute the distance transform at most this often
 
 FRONTIER_FREE_THRESHOLD = 35    # value < this counts as known-free for frontiers
 FRONTIER_MIN_CLUSTER = 3        # ignore frontier blobs smaller than this many cells

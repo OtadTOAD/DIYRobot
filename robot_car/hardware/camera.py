@@ -153,6 +153,7 @@ class CameraThread(threading.Thread):
         period = 1.0 / config.CAMERA_HZ
         while not state.stop_event.is_set():
             t0 = time.monotonic()
+            state.beat("camera")
             frame = backend.camera_read()
             if frame is None:
                 time.sleep(period)
